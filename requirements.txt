@@ -2,3 +2,4 @@ fastapi==0.104.1
 uvicorn==0.24.0
 skyfield==1.46
 numpy<2.0.0
+httpx==0.25.1
