@@ -1,129 +1,62 @@
+import os
+import asyncio
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
-from skyfield.api import load
-import math
-import httpx
-import asyncio
-import json
-from datetime import datetime, timedelta
+import asyncpg
 
-app = FastAPI(title="Artemis 2 - Definitivo")
+app = FastAPI(title="Artemis 2 - Gateway Node")
 
-# --- CARGA DE MOTORES CRÍTICOS ---
-eph = load('de421.bsp')
-earth_eph, moon_eph, sun_eph = eph['earth'], eph['moon'], eph['sun']
-ts = load.timescale()
+# Conexión a la base de datos inyectada por Railway
+DATABASE_URL = os.getenv("DATABASE_URL")
 
-# Memoria de estado vectorial
-state_vector = {
-    "pos": None, 
-    "vel": None,
-    "timestamp": datetime.utcnow(),
-    "source": "INITIALIZING..."
-}
+# Lista de celulares conectados viendo el mapa
+active_connections = set()
 
-async def fetch_nasa_jpl_live():
-    """Conexión Directa a la API de NASA Horizons (Modo Texto Seguro)"""
-    NAIF_ID = '-121' 
-    now = datetime.utcnow()
-    t_start = now.strftime('%Y-%m-%d %H:%M')
-    t_stop = (now + timedelta(minutes=2)).strftime('%Y-%m-%d %H:%M')
-
-    url = "https://ssd.jpl.nasa.gov/api/horizons.api"
-    params = {
-        "format": "text", "COMMAND": NAIF_ID, "OBJ_DATA": "NO",
-        "MAKE_EPHEM": "YES", "EPHEM_TYPE": "VECTORS", "CENTER": "500@399",
-        "START_TIME": t_start, "STOP_TIME": t_stop, "STEP_SIZE": "1m",
-        "OUT_UNITS": "KM-S", "VEC_TABLE": "2"
-    }
-
-    async with httpx.AsyncClient() as client:
+async def broadcast_telemetry(conn, pid, channel, payload):
+    """Esta función se dispara automáticamente cada vez que el worker.py grita un dato en Postgres"""
+    dead_connections = set()
+    for ws in active_connections:
         try:
-            r = await client.get(url, params=params, timeout=8.0)
-            if "$$SOE" in r.text:
-                lines = r.text.split("$$SOE")[1].split("$$EOE")[0].strip().split('\n')
-                for line in lines:
-                    if "X =" in line and "Y =" in line:
-                        p = line.split()
-                        x, y, z = float(p[2]), float(p[5]), float(p[8])
-                    elif "VX=" in line and "VY=" in line:
-                        p = line.split()
-                        vx, vy, vz = float(p[1]), float(p[3]), float(p[5])
-                        state_vector["pos"] = [x, y, z]
-                        state_vector["vel"] = [vx, vy, vz]
-                        state_vector["timestamp"] = now
-                        state_vector["source"] = "NASA JPL HORIZONS (LIVE)"
-                        return True
-        except Exception as e:
-            print(f"NASA Link Error: {e}")
-    return False
-
-async def get_telemetry_packet():
-    t = ts.now()
-    now = datetime.utcnow()
+            await ws.send_text(payload)
+        except:
+            dead_connections.add(ws)
     
-    ast_moon = earth_eph.at(t).observe(moon_eph)
-    mx, my, mz = [float(c) for c in ast_moon.position.km]
-    
-    ast_sun = earth_eph.at(t).observe(sun_eph)
-    sx, sy, sz = [float(c) for c in ast_sun.position.km]
-
-    # PROTECCIÓN ANTI-CRASH: Si no hay datos, iniciamos la nave al 85% del trayecto
-    if state_vector["pos"] is None:
-        state_vector["pos"] = [mx * 0.85, my * 0.85, mz * 0.85 + 15000]
-        state_vector["vel"] = [0.5, 0.5, 0.5] # Velocidad simulada
-        state_vector["source"] = "INTERNAL SIM (FAIL-SAFE)"
-        state_vector["timestamp"] = now
-
-    # Extrapolación de movimiento fluido
-    dt = (now - state_vector["timestamp"]).total_seconds()
-    
-    ox = state_vector["pos"][0] + (state_vector["vel"][0] * dt)
-    oy = state_vector["pos"][1] + (state_vector["vel"][1] * dt)
-    oz = state_vector["pos"][2] + (state_vector["vel"][2] * dt)
-    
-    v_mag = math.sqrt(sum(v**2 for v in state_vector["vel"]))
-    if v_mag < 0.1: v_mag = 1.152 # Fallback estético
-    
-    dist_e = math.sqrt(ox**2 + oy**2 + oz**2)
-    dist_m = math.sqrt((mx-ox)**2 + (my-oy)**2 + (mz-oz)**2)
-
-    return {
-        "time": t.utc_strftime('%H:%M:%S.%f')[:-3] + " UTC",
-        "source": state_vector["source"],
-        "moon": {"x": mx, "y": my, "z": mz},
-        "sun_dir": {"x": sx, "y": sy, "z": sz},
-        "orion": {"x": ox, "y": oy, "z": oz, "v": v_mag, "dist_e": dist_e, "dist_m": dist_m}
-    }
+    # Limpiamos los que cerraron el navegador
+    active_connections.difference_update(dead_connections)
 
 @app.on_event("startup")
 async def startup_event():
-    await fetch_nasa_jpl_live()
-    async def refresh_loop():
-        while True:
-            await fetch_nasa_jpl_live()
-            await asyncio.sleep(45)
-    asyncio.create_task(refresh_loop())
+    print("INICIANDO GATEWAY DE COMUNICACIONES...")
+    try:
+        # Nos conectamos a Postgres y nos ponemos los "auriculares" para escuchar al worker
+        app.state.db_conn = await asyncpg.connect(DATABASE_URL)
+        await app.state.db_conn.add_listener('telemetry_stream', broadcast_telemetry)
+        print("ESCUCHANDO EL CANAL TELEMETRY_STREAM OK")
+    except Exception as e:
+        print(f"Error conectando a la DB: {e}")
 
 @app.websocket("/ws/telemetry")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
+    active_connections.add(websocket)
     try:
         while True:
-            data = await get_telemetry_packet()
-            await websocket.send_text(json.dumps(data))
-            await asyncio.sleep(0.05) 
-    except WebSocketDisconnect: pass
+            # Mantenemos la conexión viva
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        active_connections.discard(websocket)
 
 @app.get("/")
 async def get_frontend():
+    # AQUÍ VA EXACTAMENTE EL MISMO HTML/JS DEL MAPA 3D QUE YA TENÍAS
+    # (Lo pego completo para que no te falte nada)
     html_content = """
     <!DOCTYPE html>
     <html lang="es">
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-        <title>NASA FIDO | Tracker</title>
+        <title>NASA FIDO | Deep Space</title>
         <style>
             @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap');
             :root { --cian: #00f2ff; --orange: #ff4800; }
@@ -145,7 +78,7 @@ async def get_frontend():
         <div id="layout">
             <div id="viewport">
                 <div class="header-box">
-                    <div style="font-size:0.7rem; font-weight:bold; background:var(--cian); color:#000; display:inline-block; padding:0 5px;">TELEMETRY LINK</div>
+                    <div style="font-size:0.7rem; font-weight:bold; background:var(--cian); color:#000; display:inline-block; padding:0 5px;">LIVE TELEMETRY LINK</div>
                     <div id="clock" class="time-val">00:00:00.000</div>
                 </div>
                 <div id="three-canvas"></div>
@@ -158,8 +91,8 @@ async def get_frontend():
                     <div class="row"><span>PROXIMIDAD LUNAR</span> <span class="val" id="v-dist-m">0 km</span></div>
                 </div>
                 <div class="card">
-                    <h2 style="margin:0 0 8px 0; font-size:0.8rem; color:var(--cian)">SISTEMA</h2>
-                    <div class="row"><span>FUENTE DE DATOS</span> <span class="val" id="v-source" style="color:#0f0">--</span></div>
+                    <h2 style="margin:0 0 8px 0; font-size:0.8rem; color:var(--cian)">SISTEMA MICROSERVICIOS</h2>
+                    <div class="row"><span>FUENTE DE DATOS</span> <span class="val" id="v-source" style="color:#0f0">CONNECTING...</span></div>
                 </div>
             </div>
         </div>
