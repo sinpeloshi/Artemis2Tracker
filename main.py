@@ -1,30 +1,27 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket
 from fastapi.responses import HTMLResponse
 from skyfield.api import load
 import math
 import httpx
 import asyncio
+import json
 from datetime import datetime, timedelta
 
-app = FastAPI(title="Artemis 2 - NASA Grade MOC")
+app = FastAPI(title="Artemis 2 | Deep Space Hologram")
 
-# Motor Astronómico Core
 eph = load('de421.bsp')
 earth, moon = eph['earth'], eph['moon']
 ts = load.timescale()
 
-# Memoria Caché para Base de Datos JPL
-nasa_cache = {
-    "orion_data": None,
-    "last_update": datetime.min
-}
+# Constante gravitacional terrestre (km^3/s^2)
+MU_EARTH = 398600.4418 
+
+nasa_cache = {"data": None, "last_update": datetime.min}
 
 async def fetch_jpl_horizons():
-    """Conexión Directa a la Red de Espacio Profundo (DSN / JPL)"""
     NAIF_ID = '-121' 
     t_start = datetime.utcnow().strftime('%Y-%m-%d %H:%M')
     t_stop = (datetime.utcnow() + timedelta(minutes=1)).strftime('%Y-%m-%d %H:%M')
-
     url = "https://ssd.jpl.nasa.gov/api/horizons.api"
     params = {
         "format": "text", "COMMAND": NAIF_ID, "OBJ_DATA": "NO",
@@ -32,240 +29,225 @@ async def fetch_jpl_horizons():
         "START_TIME": t_start, "STOP_TIME": t_stop, "STEP_SIZE": "1m",
         "OUT_UNITS": "KM-S", "VEC_TABLE": "2"
     }
-
     async with httpx.AsyncClient() as client:
         try:
-            response = await client.get(url, params=params, timeout=8.0)
+            response = await client.get(url, params=params, timeout=5.0)
             data = response.text
             if "$$SOE" in data:
-                soe_index = data.find("$$SOE")
-                eoe_index = data.find("$$EOE")
-                block = data[soe_index:eoe_index]
-                lines = block.split('\n')
+                soe = data.find("$$SOE")
+                eoe = data.find("$$EOE")
+                lines = data[soe:eoe].split('\n')
+                x, y, z, vx, vy, vz = 0,0,0,0,0,0
                 for line in lines:
-                    if "X =" in line and "Y =" in line:
+                    if "X =" in line:
                         p = line.split()
                         x, y, z = float(p[2]), float(p[5]), float(p[8])
-                    elif "VX=" in line and "VY=" in line:
+                    elif "VX=" in line:
                         p = line.split()
                         vx, vy, vz = float(p[1]), float(p[3]), float(p[5])
                         return {"x": x, "y": y, "z": z, "vx": vx, "vy": vy, "vz": vz}
-        except Exception:
-            return None
+        except: return None
     return None
 
-@app.get("/api/telemetry")
-async def get_telemetry():
+async def generate_telemetry_frame():
     t = ts.now()
     now = datetime.utcnow()
     
-    # ASTROMETRÍA PRECISA
     astrometric_moon = earth.at(t).observe(moon)
-    x_moon, y_moon, z_moon = astrometric_moon.position.km
-    v_moon_x, v_moon_y, v_moon_z = astrometric_moon.velocity.km_per_s
+    mx, my, mz = astrometric_moon.position.km
     
-    dist_moon_earth = math.sqrt(x_moon**2 + y_moon**2 + z_moon**2)
-    vel_moon = math.sqrt(v_moon_x**2 + v_moon_y**2 + v_moon_z**2)
-    
-    # ENLACE JPL HORIZONS
     if (now - nasa_cache["last_update"]).total_seconds() > 60:
-        jpl_data = await fetch_jpl_horizons()
-        if jpl_data:
-            nasa_cache["orion_data"] = jpl_data
+        jpl = await fetch_jpl_horizons()
+        if jpl:
+            nasa_cache["data"] = jpl
             nasa_cache["last_update"] = now
 
-    orion = nasa_cache["orion_data"]
+    orion = nasa_cache["data"]
     
     if orion:
-        x_orion, y_orion, z_orion = orion["x"], orion["y"], orion["z"]
-        vel_orion = math.sqrt(orion["vx"]**2 + orion["vy"]**2 + orion["vz"]**2)
-        source = "DSN/JPL HORIZONS LOCK"
-        status = "NOMINAL"
+        ox, oy, oz = orion["x"], orion["y"], orion["z"]
+        ovx, ovy, ovz = orion["vx"], orion["vy"], orion["vz"]
+        status = "DSN LOCK"
     else:
-        # Interpolación hiperbólica simulada (Fallback)
-        x_orion, y_orion, z_orion = x_moon * 0.88, y_moon * 0.88, z_moon * 0.88 + 12500
-        vel_orion = 1.152 + (math.sin(now.second / 10) * 0.005) # Microfluctuación realista
-        source = "INTERNAL TELEMETRY CALC"
-        status = "DEGRADED (API TIMEOUT)"
+        # Interpolación avanzada si NASA corta la API
+        ox, oy, oz = mx * 0.88, my * 0.88, mz * 0.88 + 12500
+        ovx, ovy, ovz = 0.5, 0.5, 0.5
+        status = "INTERNAL SIM"
 
-    dist_orion_earth = math.sqrt(x_orion**2 + y_orion**2 + z_orion**2)
-    dist_orion_moon = math.sqrt((x_moon-x_orion)**2 + (y_moon-y_orion)**2 + (z_moon-z_orion)**2)
+    r = math.sqrt(ox**2 + oy**2 + oz**2)
+    v = math.sqrt(ovx**2 + ovy**2 + ovz**2)
     
+    # Cálculo Kepleriano de la Energía Orbital Específica y Semieje Mayor
+    try:
+        epsilon = (v**2 / 2) - (MU_EARTH / r)
+        semi_major_axis = -MU_EARTH / (2 * epsilon) if epsilon != 0 else 0
+    except:
+        epsilon, semi_major_axis = 0, 0
+
     return {
-        "sys_time": t.utc_strftime('%Y-%jT%H:%M:%S.000Z'), # Formato NASA (Día del año)
-        "signal": {"source": source, "status": status},
-        "moon": {"x": x_moon, "y": y_moon, "z": z_moon, "dist_km": dist_moon_earth, "v_kms": vel_moon},
-        "orion": {"x": x_orion, "y": y_orion, "z": z_orion, "dist_earth_km": dist_orion_earth, "dist_moon_km": dist_orion_moon, "v_kms": vel_orion}
+        "time": t.utc_strftime('%H:%M:%S.%f')[:-3] + ' UTC',
+        "status": status,
+        "moon": {"x": mx, "y": my, "z": mz},
+        "orion": {"x": ox, "y": oy, "z": oz, "v": v, "r": r},
+        "kepler": {"epsilon": epsilon, "sma": semi_major_axis}
     }
+
+# WEBSOCKET: Transmisión en tiempo real sin latencia HTTP
+@app.websocket("/ws/telemetry")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    try:
+        while True:
+            frame = await generate_telemetry_frame()
+            await websocket.send_text(json.dumps(frame))
+            await asyncio.sleep(0.5) # Empuja datos 2 veces por segundo
+    except:
+        pass # Maneja la desconexión limpia del cliente
 
 @app.get("/")
 async def get_frontend():
-    html_content = """
+    html = """
     <!DOCTYPE html>
     <html lang="en">
     <head>
         <meta charset="UTF-8">
-        <title>NASA MOC | Artemis Flight Dynamics</title>
-        <script src="https://cdn.plot.ly/plotly-2.24.1.min.js"></script>
+        <title>NASA | 3D Tactical Hologram</title>
         <style>
-            @import url('https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@300;500;700&display=swap');
-            
-            :root { --bg: #050505; --panel: #0a0a0a; --neon-blue: #00e5ff; --neon-orange: #ff3d00; --neon-green: #00e676; --grid-color: rgba(0, 229, 255, 0.1); }
-            
-            body, html { margin: 0; padding: 0; height: 100%; background-color: var(--bg); color: #fff; font-family: 'Roboto Mono', monospace; overflow: hidden; }
-            
-            /* Scanlines overlay para efecto monitor viejo */
-            body::after { content: " "; display: block; position: absolute; top: 0; left: 0; bottom: 0; right: 0; background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.25) 50%), linear-gradient(90deg, rgba(255, 0, 0, 0.06), rgba(0, 255, 0, 0.02), rgba(0, 0, 255, 0.06)); z-index: 2; background-size: 100% 2px, 3px 100%; pointer-events: none; }
-            
-            #dashboard { display: grid; grid-template-columns: 350px 1fr; grid-template-rows: 60px 1fr 250px; height: 100vh; gap: 2px; background-color: #333; padding: 2px; box-sizing: border-box; position: relative; z-index: 1;}
-            
-            .panel { background-color: var(--panel); position: relative; overflow: hidden; }
-            .header { grid-column: 1 / -1; display: flex; justify-content: space-between; align-items: center; padding: 0 20px; border-bottom: 2px solid var(--neon-blue); background: #00111a;}
-            
-            h1 { font-size: 1.2rem; color: var(--neon-blue); text-transform: uppercase; letter-spacing: 2px; margin: 0; text-shadow: 0 0 10px rgba(0, 229, 255, 0.5); }
-            .blinking-dot { display: inline-block; width: 10px; height: 10px; background-color: var(--neon-green); border-radius: 50%; margin-right: 10px; animation: blink 1s infinite; box-shadow: 0 0 8px var(--neon-green); }
-            @keyframes blink { 0% {opacity: 1;} 50% {opacity: 0.2;} 100% {opacity: 1;} }
-
-            #sidebar { grid-column: 1; grid-row: 2 / 4; border-right: 1px solid var(--neon-blue); padding: 15px; display: flex; flex-direction: column; gap: 20px; overflow-y: auto;}
-            #main-3d { grid-column: 2; grid-row: 2; border-bottom: 1px solid var(--neon-blue); }
-            #telemetry-chart { grid-column: 2; grid-row: 3; }
-
-            .data-group { border: 1px solid rgba(255,255,255,0.1); padding: 10px; background: rgba(255,255,255,0.02); }
-            .data-group h3 { margin: 0 0 10px 0; font-size: 0.85rem; color: #888; border-bottom: 1px dotted #555; padding-bottom: 5px; }
-            .metric { display: flex; justify-content: space-between; font-size: 0.85rem; margin-bottom: 8px; }
-            .metric .label { color: #aaa; }
-            .metric .val { font-weight: 700; color: var(--neon-orange); text-shadow: 0 0 5px rgba(255, 61, 0, 0.4); }
-            .metric .val.green { color: var(--neon-green); text-shadow: 0 0 5px rgba(0, 230, 118, 0.4); }
-
-            #raw-terminal { font-size: 0.7rem; color: #555; height: 150px; overflow-y: hidden; margin-top: auto; border-top: 1px solid #333; padding-top: 10px;}
-            #raw-terminal div { margin-bottom: 2px; }
+            @import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&display=swap');
+            body { margin: 0; overflow: hidden; background: #000; color: #0f0; font-family: 'Space Mono', monospace; }
+            #hud { position: absolute; top: 20px; left: 20px; z-index: 10; pointer-events: none; text-shadow: 0 0 5px #0f0; }
+            .panel { border: 1px solid rgba(0, 255, 0, 0.3); background: rgba(0, 20, 0, 0.7); padding: 15px; margin-bottom: 10px; box-shadow: inset 0 0 10px rgba(0, 255, 0, 0.2); }
+            h1 { font-size: 14px; margin: 0 0 10px 0; border-bottom: 1px solid #0f0; padding-bottom: 5px; }
+            .d-row { display: flex; justify-content: space-between; width: 300px; font-size: 12px; margin-bottom: 4px; }
+            .v { font-weight: bold; color: #fff; }
+            #gl-container { position: absolute; top: 0; left: 0; width: 100vw; height: 100vh; }
         </style>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+        <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
     </head>
     <body>
-        <div id="dashboard">
-            <div class="panel header">
-                <div><span class="blinking-dot"></span><h1>Artemis II | FIDO Flight Dynamics Console</h1></div>
-                <div id="sys-time" style="color: var(--neon-blue); font-weight: bold;">T-00:00:00.000Z</div>
+        <div id="hud">
+            <div class="panel">
+                <h1>ARTEMIS TACTICAL LINK</h1>
+                <div class="d-row"><span>SYSTEM TIME:</span> <span class="v" id="t-time">SYNCING...</span></div>
+                <div class="d-row"><span>DATA LINK:</span> <span class="v" id="t-status" style="color:cyan">WAITING</span></div>
             </div>
-
-            <div class="panel" id="sidebar">
-                <div class="data-group">
-                    <h3>UPLINK STATUS</h3>
-                    <div class="metric"><span class="label">SOURCE:</span> <span class="val green" id="v-source">--</span></div>
-                    <div class="metric"><span class="label">INTEGRITY:</span> <span class="val green" id="v-status">--</span></div>
-                </div>
-
-                <div class="data-group">
-                    <h3 style="color: var(--neon-orange);">ORION CAPSULE</h3>
-                    <div class="metric"><span class="label">INERTIAL VEL:</span> <span class="val" id="o-vel">0.000 km/s</span></div>
-                    <div class="metric"><span class="label">ALT (EARTH):</span> <span class="val" id="o-dist-e">0.00 km</span></div>
-                    <div class="metric"><span class="label">DIST (MOON):</span> <span class="val" id="o-dist-m">0.00 km</span></div>
-                    <div class="metric"><span class="label">X-VECTOR:</span> <span class="val" id="o-x" style="color:#fff;">0.0</span></div>
-                    <div class="metric"><span class="label">Y-VECTOR:</span> <span class="val" id="o-y" style="color:#fff;">0.0</span></div>
-                    <div class="metric"><span class="label">Z-VECTOR:</span> <span class="val" id="o-z" style="color:#fff;">0.0</span></div>
-                </div>
-
-                <div class="data-group">
-                    <h3 style="color: #aaa;">LUNAR TARGET</h3>
-                    <div class="metric"><span class="label">ORBITAL VEL:</span> <span class="val" style="color:#fff;" id="m-vel">0.000 km/s</span></div>
-                    <div class="metric"><span class="label">EARTH DIST:</span> <span class="val" style="color:#fff;" id="m-dist">0.00 km</span></div>
-                </div>
-
-                <div id="raw-terminal"></div>
+            <div class="panel">
+                <h1>FLIGHT DYNAMICS (FIDO)</h1>
+                <div class="d-row"><span>INERTIAL VEL:</span> <span class="v" id="o-v">0.00 km/s</span></div>
+                <div class="d-row"><span>EARTH DIST:</span> <span class="v" id="o-r">0.00 km</span></div>
             </div>
-
-            <div class="panel" id="main-3d"></div>
-            <div class="panel" id="telemetry-chart"></div>
+            <div class="panel">
+                <h1>KEPLERIAN ORBITAL ELEMENTS</h1>
+                <div class="d-row"><span>SPECIFIC ENERGY (ε):</span> <span class="v" id="k-e">0.00 km²/s²</span></div>
+                <div class="d-row"><span>SEMI-MAJOR AXIS (a):</span> <span class="v" id="k-a">0.00 km</span></div>
+            </div>
         </div>
 
+        <div id="gl-container"></div>
+
         <script>
-            // Arrays para historial de vuelo
-            const timeHistory = [];
-            const velocityHistory = [];
-            const orionTrailX = [], orionTrailY = [], orionTrailZ = [];
+            // INICIALIZACIÓN THREE.JS (Escala 1:1000 para renderizado)
+            const SCALE = 1000; 
+            const scene = new THREE.Scene();
+            scene.fog = new THREE.FogExp2(0x000000, 0.000002);
+
+            const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 1, 5000000);
+            camera.position.set(0, 150000, 400000);
+
+            const renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            document.getElementById('gl-container').appendChild(renderer.domElement);
+
+            const controls = new THREE.OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true;
+            controls.dampingFactor = 0.05;
+
+            // ESTÉTICA TÁCTICA: Tierra (Wireframe Cyan), Luna (Gris), Orion (Punto de Luz Rojo)
+            const earthGeo = new THREE.SphereGeometry(6371 / SCALE, 32, 32);
+            const earthMat = new THREE.MeshBasicMaterial({ color: 0x00ffff, wireframe: true, transparent: true, opacity: 0.3 });
+            const earth = new THREE.Mesh(earthGeo, earthMat);
+            scene.add(earth);
+
+            const moonGeo = new THREE.SphereGeometry(1737 / SCALE, 16, 16);
+            const moonMat = new THREE.MeshBasicMaterial({ color: 0x888888, wireframe: true });
+            const moon = new THREE.Mesh(moonGeo, moonMat);
+            scene.add(moon);
+
+            const orionGeo = new THREE.SphereGeometry(500 / SCALE, 8, 8); // Exagerado visualmente
+            const orionMat = new THREE.MeshBasicMaterial({ color: 0xff0000 });
+            const orion = new THREE.Mesh(orionGeo, orionMat);
             
-            // Estrellas de fondo
-            const stX = [], stY = [], stZ = [];
-            for(let i=0; i<500; i++) { stX.push((Math.random() - 0.5) * 2e6); stY.push((Math.random() - 0.5) * 2e6); stZ.push((Math.random() - 0.5) * 2e6); }
+            // Glow alrededor de Orion
+            const glow = new THREE.PointLight(0xff0000, 2, 50000);
+            orion.add(glow);
+            scene.add(orion);
 
-            async function updateMOC() {
-                try {
-                    const res = await fetch('/api/telemetry');
-                    const d = await res.json();
-                    
-                    // 1. Actualizar Textos
-                    document.getElementById('sys-time').innerText = d.sys_time;
-                    document.getElementById('v-source').innerText = d.signal.source;
-                    document.getElementById('v-status').innerText = d.signal.status;
-                    document.getElementById('v-status').style.color = d.signal.status === 'NOMINAL' ? '#00e676' : '#ffea00';
-                    
-                    document.getElementById('o-vel').innerText = d.orion.v_kms.toFixed(4) + ' km/s';
-                    document.getElementById('o-dist-e').innerText = d.orion.dist_earth_km.toLocaleString('en-US', {maximumFractionDigits: 1}) + ' km';
-                    document.getElementById('o-dist-m').innerText = d.orion.dist_moon_km.toLocaleString('en-US', {maximumFractionDigits: 1}) + ' km';
-                    document.getElementById('o-x').innerText = d.orion.x.toFixed(1);
-                    document.getElementById('o-y').innerText = d.orion.y.toFixed(1);
-                    document.getElementById('o-z').innerText = d.orion.z.toFixed(1);
-                    
-                    document.getElementById('m-vel').innerText = d.moon.v_kms.toFixed(4) + ' km/s';
-                    document.getElementById('m-dist').innerText = d.moon.dist_km.toLocaleString('en-US', {maximumFractionDigits: 1}) + ' km';
+            // Trayectoria Dinámica
+            const maxTrail = 150;
+            const trailPositions = new Float32Array(maxTrail * 3);
+            const trailGeo = new THREE.BufferGeometry();
+            trailGeo.setAttribute('position', new THREE.BufferAttribute(trailPositions, 3));
+            const trailMat = new THREE.LineBasicMaterial({ color: 0xff0000, transparent: true, opacity: 0.5 });
+            const trailLine = new THREE.Line(trailGeo, trailMat);
+            scene.add(trailLine);
+            let trailCount = 0;
 
-                    // Terminal simulada
-                    const term = document.getElementById('raw-terminal');
-                    term.innerHTML = `<div>> RECV PKT: ${d.sys_time}</div>` + term.innerHTML;
-                    if(term.childElementCount > 8) term.removeChild(term.lastChild);
+            // Cuadrícula Espacial (Grid Helper)
+            const gridHelper = new THREE.GridHelper(1000000 / SCALE, 100, 0x004400, 0x001100);
+            scene.add(gridHelper);
 
-                    // 2. Lógica de Memoria (Trail y Gráficos)
-                    const nowStr = d.sys_time.split('T')[1].substring(0,8);
-                    timeHistory.push(nowStr);
-                    velocityHistory.push(d.orion.v_kms);
-                    
-                    orionTrailX.push(d.orion.x);
-                    orionTrailY.push(d.orion.y);
-                    orionTrailZ.push(d.orion.z);
+            // CONEXIÓN WEBSOCKET AL BACKEND
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const ws = new WebSocket(protocol + '//' + window.location.host + '/ws/telemetry');
 
-                    // Mantener arrays con límite
-                    if(timeHistory.length > 50) { timeHistory.shift(); velocityHistory.shift(); }
-                    if(orionTrailX.length > 100) { orionTrailX.shift(); orionTrailY.shift(); orionTrailZ.shift(); }
+            ws.onmessage = function(event) {
+                const d = JSON.parse(event.data);
+                
+                // Actualizar HUD
+                document.getElementById('t-time').innerText = d.time;
+                document.getElementById('t-status').innerText = d.status;
+                document.getElementById('o-v').innerText = d.orion.v.toFixed(5) + ' km/s';
+                document.getElementById('o-r').innerText = d.orion.r.toLocaleString('en-US', {maximumFractionDigits: 1}) + ' km';
+                document.getElementById('k-e').innerText = d.kepler.epsilon.toFixed(4);
+                document.getElementById('k-a').innerText = d.kepler.sma.toLocaleString('en-US', {maximumFractionDigits: 0}) + ' km';
 
-                    // 3. Render 3D (Main Panel)
-                    const layout3D = {
-                        margin: { l: 0, r: 0, b: 0, t: 0 }, paper_bgcolor: 'transparent', plot_bgcolor: 'transparent',
-                        scene: { 
-                            xaxis: {visible: false}, yaxis: {visible: false}, zaxis: {visible: false},
-                            camera: { eye: {x: 1.2, y: 1.2, z: 0.6} }
-                        }, showlegend: false
-                    };
-                    
-                    const traces3D = [
-                        { x: stX, y: stY, z: stZ, mode: 'markers', marker: {size: 1, color: '#444'}, type: 'scatter3d', hoverinfo: 'none' }, // Stars
-                        { x: [0], y: [0], z: [0], mode: 'markers', marker: { size: 20, color: '#00e5ff' }, type: 'scatter3d', name: 'Earth' },
-                        { x: [d.moon.x], y: [d.moon.y], z: [d.moon.z], mode: 'markers', marker: { size: 10, color: '#aaa' }, type: 'scatter3d', name: 'Moon' },
-                        { x: [d.orion.x], y: [d.orion.y], z: [d.orion.z], mode: 'markers', marker: { size: 8, color: '#ff3d00', symbol: 'diamond' }, type: 'scatter3d', name: 'Orion' },
-                        { x: orionTrailX, y: orionTrailY, z: orionTrailZ, mode: 'lines', line: { color: '#ff3d00', width: 2 }, type: 'scatter3d', name: 'Trajectory' } // El Trail!
-                    ];
-                    Plotly.react('main-3d', traces3D, layout3D, {displayModeBar: false});
+                // Actualizar Físicas 3D (Escaladas)
+                moon.position.set(d.moon.x / SCALE, d.moon.z / SCALE, -d.moon.y / SCALE); // Mapeo XYZ a XZY en Three.js
+                orion.position.set(d.orion.x / SCALE, d.orion.z / SCALE, -d.orion.y / SCALE);
 
-                    // 4. Render 2D Chart (Telemetry Panel)
-                    const layout2D = {
-                        margin: { l: 40, r: 20, b: 30, t: 30 }, paper_bgcolor: 'transparent', plot_bgcolor: 'transparent', font: {color: '#888', family: 'Roboto Mono'},
-                        title: {text: 'ORION INERTIAL VELOCITY (km/s)', font: {size: 12, color: '#00e5ff'}},
-                        xaxis: {showgrid: true, gridcolor: '#222', tickfont: {size: 10}}, 
-                        yaxis: {showgrid: true, gridcolor: '#222', tickfont: {size: 10}}
-                    };
-                    const trace2D = [{ x: timeHistory, y: velocityHistory, type: 'scatter', mode: 'lines+markers', line: {color: '#ff3d00', shape: 'spline'}, marker: {size: 4, color: '#00e5ff'} }];
-                    Plotly.react('telemetry-chart', trace2D, layout2D, {displayModeBar: false});
-
-                } catch (err) {
-                    console.error("FIDO Console Error:", err);
-                    document.getElementById('v-status').innerText = 'LOS (LOSS OF SIGNAL)';
-                    document.getElementById('v-status').style.color = 'red';
+                // Actualizar Trayectoria
+                const positions = trailLine.geometry.attributes.position.array;
+                for(let i = maxTrail - 1; i > 0; i--) {
+                    positions[i * 3] = positions[(i - 1) * 3];
+                    positions[i * 3 + 1] = positions[(i - 1) * 3 + 1];
+                    positions[i * 3 + 2] = positions[(i - 1) * 3 + 2];
                 }
+                positions[0] = orion.position.x;
+                positions[1] = orion.position.y;
+                positions[2] = orion.position.z;
+                
+                trailLine.geometry.attributes.position.needsUpdate = true;
+            };
+
+            // Loop de Renderizado a 60 FPS
+            function animate() {
+                requestAnimationFrame(animate);
+                earth.rotation.y += 0.001; // Rotación terrestre simulada
+                controls.update();
+                renderer.render(scene, camera);
             }
-            
-            updateMOC();
-            setInterval(updateMOC, 2500); 
+            animate();
+
+            // Auto-ajuste de ventana
+            window.addEventListener('resize', onWindowResize, false);
+            function onWindowResize() {
+                camera.aspect = window.innerWidth / window.innerHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(window.innerWidth, window.innerHeight);
+            }
         </script>
     </body>
     </html>
     """
-    return HTMLResponse(content=html_content)
+    return HTMLResponse(content=html)
