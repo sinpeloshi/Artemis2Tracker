@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Misión Orion - Telemetría 3D</title>
+    
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+
+    <style>
+        /* Estilos generales y fondo */
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #010a15; /* Azul muy oscuro tipo espacio */
+            font-family: 'Courier New', Courier, monospace; /* Fuente de terminal */
+            user-select: none;
+        }
+
+        /* Contenedor del motor 3D */
+        #canvas-container {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 1;
+        }
+
+        /* Panel Superior Izquierdo */
+        #top-panel {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            z-index: 10;
+            color: #00ffff;
+        }
+        .badge {
+            background-color: #00ffff;
+            color: #000;
+            padding: 2px 5px;
+            font-weight: bold;
+            font-size: 12px;
+            display: inline-block;
+            margin-bottom: 5px;
+        }
+        #reloj {
+            font-size: 18px;
+            font-weight: bold;
+        }
+
+        /* Panel Inferior de Telemetría */
+        #telemetry-panel {
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            width: 100%;
+            background: rgba(1, 10, 21, 0.85); /* Fondo semi-transparente */
+            border-top: 2px solid #0088aa;
+            z-index: 10;
+            padding: 15px;
+            box-sizing: border-box;
+            color: #0088aa;
+            font-size: 12px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .panel-section {
+            border: 1px solid #004455;
+            padding: 10px;
+        }
+
+        h3 {
+            color: #ff6600;
+            margin: 0 0 10px 0;
+            font-size: 14px;
+            border-bottom: 1px solid #ff6600;
+            padding-bottom: 3px;
+            display: inline-block;
+        }
+
+        /* Cuadrícula de datos */
+        .data-grid {
+            display: flex;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 20px;
+        }
+
+        .data-column {
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+            min-width: 250px;
+        }
+
+        .data-row {
+            display: flex;
+            justify-content: space-between;
+        }
+
+        .val-orange { color: #ff6600; font-weight: bold; }
+        .val-white { color: #ffffff; }
+        .val-green { color: #00ff00; }
+        .val-cyan { color: #00ffff; }
+    </style>
+</head>
+<body>
+
+    <div id="canvas-container"></div>
+
+    <div id="top-panel">
+        <div class="badge">▶ TELEMETRY LINK ACTIVE</div>
+        <div id="reloj">00:00:00.000 UTC</div>
+    </div>
+
+    <div id="telemetry-panel">
+        <div class="panel-section">
+            <h3>CÁPSULA ORION (ESTADO VECTORIAL Y SISTEMAS)</h3>
+            
+            <div class="data-grid">
+                <div class="data-column">
+                    <div class="data-row"><span>VELOCIDAD INERCIAL</span> <span class="val-orange" id="vel-inercial">1.10631 km/s</span></div>
+                    <div class="data-row"><span>ALTITUD TIERRA</span> <span class="val-white"><span id="alt-tierra">289,321</span> km <span class="val-green">▲</span></span></div>
+                    <div class="data-row"><span>PROXIMIDAD LUNAR</span> <span class="val-white"><span id="prox-lunar">112,792</span> km <span class="val-green">▼</span></span></div>
+                </div>
+
+                <div class="data-column">
+                    <div class="data-row"><span>PROPELENTE (RCS)</span> <span class="val-white" id="fuel-rcs">87.40 %</span></div>
+                    <div class="data-row"><span>ENERGÍA (PANELES)</span> <span class="val-white" id="energia">99.80 %</span></div>
+                    <div class="data-row"><span>TEMP. EXTERIOR</span> <span class="val-white" id="temp-ext">-152.4 °C</span></div>
+                </div>
+
+                <div class="data-column">
+                    <div class="data-row"><span>PITCH / YAW / ROLL</span> <span class="val-white"><span id="pitch">0.05</span>° / <span id="yaw">-0.02</span>° / <span id="roll">0.00</span>°</span></div>
+                    <div class="data-row"><span>ESTADO MOTOR</span> <span style="color: #888;">APAGADO (INERCIA)</span></div>
+                    <div class="data-row"><span>MÉTRICAS DE RED</span> <span class="val-green">BUSCANDO SEÑAL DSN (SIM)</span></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // ==========================================
+        // 1. VARIABLES DE ESTADO Y TELEMETRÍA (Lógica Corregida)
+        // ==========================================
+        let estadoTelemetria = {
+            distanciaTierra: 289321.0,
+            distanciaLuna: 112792.0,
+            velocidadKms: 1.10631,
+            fuel: 87.40
+        };
+
+        // ==========================================
+        // 2. CONFIGURACIÓN DEL MOTOR 3D (Three.js)
+        // ==========================================
+        const container = document.getElementById('canvas-container');
+        const scene = new THREE.Scene();
+        
+        // Cámara
+        const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 20000);
+        camera.position.set(0, 150, 300); 
+
+        // Renderizador
+        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(window.devicePixelRatio);
+        container.appendChild(renderer.domElement);
+
+        // Controles de cámara (para mover con el mouse/dedo)
+        const controls = new THREE.OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.05;
+
+        // Luces
+        scene.add(new THREE.AmbientLight(0x222222));
+        const sol = new THREE.DirectionalLight(0xffffff, 1.5);
+        sol.position.set(500, 100, -200); // El sol viene de lejos
+        scene.add(sol);
+
+        // Texturas (usando URLs públicas confiables)
+        const textureLoader = new THREE.TextureLoader();
+        const earthTex = textureLoader.load('https://raw.githubusercontent.com/mrdoob/three.js/master/examples/textures/planets/earth_atmos_2048.jpg');
+        const moonTex = textureLoader.load('https://raw.githubusercontent.com/mrdoob/three.js/master/examples/textures/planets/moon_1024.jpg');
+
+        // ==========================================
+        // 3. CREACIÓN DE OBJETOS CELESTES
+        // ==========================================
+        
+        // A. La Tierra (A la derecha)
+        const tierra = new THREE.Mesh(
+            new THREE.SphereGeometry(30, 64, 64),
+            new THREE.MeshStandardMaterial({ map: earthTex, roughness: 0.6 })
+        );
+        tierra.position.set(150, 0, -50);
+        scene.add(tierra);
+
+        // B. La Luna (A la izquierda)
+        const luna = new THREE.Mesh(
+            new THREE.SphereGeometry(8, 32, 32),
+            new THREE.MeshStandardMaterial({ map: moonTex, roughness: 1 })
+        );
+        luna.position.set(-150, 20, -100);
+        scene.add(luna);
+
+        // C. La Cápsula Orion (Construida con primitivas)
+        const orion = new THREE.Group();
+        
+        // Cuerpo principal
+        const cuerpo = new THREE.Mesh(
+            new THREE.ConeGeometry(2, 4, 16),
+            new THREE.MeshStandardMaterial({ color: 0xdddddd, metalness: 0.8 })
+        );
+        cuerpo.rotation.x = Math.PI / 2;
+        orion.add(cuerpo);
+
+        // Paneles solares (Cruz)
+        const materialPanel = new THREE.MeshStandardMaterial({ color: 0x0033aa, metalness: 0.5, roughness: 0.2 });
+        const panel1 = new THREE.Mesh(new THREE.BoxGeometry(12, 0.2, 2), materialPanel);
+        const panel2 = new THREE.Mesh(new THREE.BoxGeometry(2, 0.2, 12), materialPanel);
+        panel1.position.z = -2;
+        panel2.position.z = -2;
+        orion.add(panel1);
+        orion.add(panel2);
+
+        // Empezamos posicionando la nave más cerca de la luna (según tus datos)
+        orion.position.set(-50, 10, -80); 
+        scene.add(orion);
+
+        // D. La Cuadrícula de fondo (Ese efecto radar/mapa que tenías)
+        const gridHelper = new THREE.GridHelper(2000, 100, 0x004444, 0x002222);
+        gridHelper.position.y = -50;
+        scene.add(gridHelper);
+
+        // E. Estrellas de fondo
+        const starsGeo = new THREE.BufferGeometry();
+        const starsPos = new Float32Array(3000 * 3);
+        for(let i = 0; i < 9000; i++) {
+            starsPos[i] = (Math.random() - 0.5) * 2000;
+        }
+        starsGeo.setAttribute('position', new THREE.BufferAttribute(starsPos, 3));
+        const starsMat = new THREE.PointsMaterial({ color: 0xffffff, size: 1.5 });
+        scene.add(new THREE.Points(starsGeo, starsMat));
+
+        // Letreros simples para los planetas
+        // En un proyecto real se usan Sprites, aquí simulamos que sabemos dónde están
+        
+        // ==========================================
+        // 4. BUCLE DE RENDERIZADO 3D (60 FPS)
+        // ==========================================
+        function animar3D() {
+            requestAnimationFrame(animar3D);
+            
+            // Rotación natural de los planetas
+            tierra.rotation.y += 0.0005;
+            luna.rotation.y += 0.0001;
+
+            controls.update();
+            renderer.render(scene, camera);
+        }
+        animar3D(); // Iniciar motor 3D
+
+        // ==========================================
+        // 5. MOTOR DE TELEMETRÍA (Actualiza datos 1 vez por seg)
+        // ==========================================
+        function actualizarTelemetria() {
+            // A. MATEMÁTICA CORREGIDA: Suma a la Tierra, Resta a la Luna
+            estadoTelemetria.distanciaTierra += estadoTelemetria.velocidadKms;
+            estadoTelemetria.distanciaLuna -= estadoTelemetria.velocidadKms;
+
+            // B. Actualizar interfaz de usuario (DOM)
+            document.getElementById('alt-tierra').innerText = estadoTelemetria.distanciaTierra.toLocaleString('en-US', {minimumFractionDigits: 0, maximumFractionDigits: 0});
+            document.getElementById('prox-lunar').innerText = estadoTelemetria.distanciaLuna.toLocaleString('en-US', {minimumFractionDigits: 0, maximumFractionDigits: 0});
+            
+            // Simular fluctuación de combustible
+            if(Math.random() > 0.8) {
+                estadoTelemetria.fuel -= 0.01;
+                document.getElementById('fuel-rcs').innerText = estadoTelemetria.fuel.toFixed(2) + ' %';
+            }
+
+            // Simular giros de la nave (Pitch/Yaw/Roll)
+            document.getElementById('pitch').innerText = ((Math.random() * 0.1) - 0.05).toFixed(2);
+            document.getElementById('yaw').innerText = ((Math.random() * 0.1) - 0.05).toFixed(2);
+            document.getElementById('temp-ext').innerText = (-152.0 + (Math.random() * 2)).toFixed(1) + ' °C';
+
+            // Actualizar el Reloj UTC
+            const ahora = new Date();
+            document.getElementById('reloj').innerText = ahora.toISOString().substring(11, 23) + " UTC";
+
+            // C. MOVER LA NAVE EN EL 3D HACIA LA LUNA
+            // Calculamos el vector que apunta de la nave a la luna
+            const direccionHaciaLuna = new THREE.Vector3().subVectors(luna.position, orion.position).normalize();
+            
+            // Movemos la nave físicamente en esa dirección (velocidad a escala visual)
+            const velocidadVisual = 0.02; 
+            orion.position.addScaledVector(direccionHaciaLuna, velocidadVisual);
+            
+            // ¡Clave! Hacemos que la trompa de la nave apunte a su destino
+            orion.lookAt(luna.position);
+        }
+
+        // Ejecutar el motor de telemetría cada 1000 milisegundos (1 segundo)
+        setInterval(actualizarTelemetria, 1000);
+
+        // ==========================================
+        // 6. RESPONSIVE DESIGN (Si cambias el tamaño de la ventana)
+        // ==========================================
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+    </script>
+</body>
+</html>
