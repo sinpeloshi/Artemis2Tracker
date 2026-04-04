@@ -4,31 +4,39 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 import asyncpg
 
-app = FastAPI(title="Deep Space Gateway")
+app = FastAPI(title="Artemis II Gateway")
 DATABASE_URL = os.getenv("DATABASE_URL")
 active_connections = set()
 
 async def broadcast_telemetry(conn, pid, channel, payload):
+    """Reenvía la telemetría de Postgres a todos los clientes WebSockets"""
     dead = set()
     for ws in active_connections:
-        try: await ws.send_text(payload)
-        except: dead.add(ws)
+        try: 
+            await ws.send_text(payload)
+        except: 
+            dead.add(ws)
     active_connections.difference_update(dead)
 
 @app.on_event("startup")
 async def startup_event():
+    print("INICIANDO GATEWAY DE COMUNICACIONES...")
     try:
         app.state.db_conn = await asyncpg.connect(DATABASE_URL)
         await app.state.db_conn.add_listener('telemetry_stream', broadcast_telemetry)
-    except Exception as e: print(f"DB Error: {e}")
+        print("ESCUCHANDO EL CANAL TELEMETRY_STREAM OK")
+    except Exception as e: 
+        print(f"DB Error: {e}")
 
 @app.websocket("/ws/telemetry")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     active_connections.add(websocket)
     try:
-        while True: await websocket.receive_text()
-    except WebSocketDisconnect: active_connections.discard(websocket)
+        while True: 
+            await websocket.receive_text() # Mantiene la conexión viva
+    except WebSocketDisconnect: 
+        active_connections.discard(websocket)
 
 @app.get("/")
 async def get_frontend():
@@ -38,7 +46,7 @@ async def get_frontend():
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-        <title>NASA FIDO | Real Data</title>
+        <title>NASA FIDO | Deep Space</title>
         <style>
             @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap');
             :root { --cian: #00f2ff; --orange: #ff4800; --green: #00ff88; }
@@ -71,7 +79,7 @@ async def get_frontend():
             </div>
             <div id="hud">
                 <div class="card red">
-                    <h2 style="margin:0 0 8px 0; font-size:0.8rem; color:var(--orange)">LUNAR RECONNAISSANCE ORBITER (LRO)</h2>
+                    <h2 style="margin:0 0 8px 0; font-size:0.8rem; color:var(--orange)">ARTEMIS II (ORION CAPSULE)</h2>
                     <div class="row"><span class="lbl">VELOCIDAD INERCIAL</span> <span class="val orange" id="v-vel">0.000 km/s</span></div>
                     <div class="row"><span class="lbl">VELOCIDAD (MACH)</span> <span class="val" id="v-mach">0.00 M</span></div>
                     <div class="row"><span class="lbl">ALTITUD TIERRA</span> <span class="val" id="v-dist-e">0 km</span></div>
@@ -152,7 +160,7 @@ async def get_frontend():
                 const p1 = new THREE.Mesh(new THREE.PlaneGeometry(25,4), new THREE.MeshBasicMaterial({color:0x0044aa, side:THREE.DoubleSide}));
                 p1.rotation.x = Math.PI/2;
                 orion.add(body, head, p1);
-                const oTag = createTag("LRO SATELLITE", "#ff4800"); oTag.position.y = 20; orion.add(oTag);
+                const oTag = createTag("ORION", "#ff4800"); oTag.position.y = 20; orion.add(oTag);
                 scene.add(orion);
 
                 const starsGeo = new THREE.BufferGeometry();
