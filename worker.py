@@ -90,12 +90,26 @@ async def physics_loop():
         ast_moon = earth_eph.at(t).observe(moon_eph).position.km
         mx, my, mz = [float(c) for c in ast_moon]
         
-        # Si no tenemos datos de la NASA aún, activamos el simulador inercial pro
+        # Si no tenemos datos de la NASA aún, activamos el simulador inercial corregido
         if state_vector["pos"] is None:
-            # Ubicamos la nave al 72% del camino (donde debería estar ahora según el día de misión)
+            # 1. Calculamos la distancia total a la Luna
+            dist_luna_total = math.sqrt(mx**2 + my**2 + mz**2)
+            
+            # 2. Calculamos el VECTOR UNITARIO (la flecha matemática que apunta exactamente a la Luna)
+            dir_x = mx / dist_luna_total
+            dir_y = my / dist_luna_total
+            dir_z = mz / dist_luna_total
+            
+            # 3. Le aplicamos la velocidad de 1.105 km/s en esa dirección exacta
+            velocidad_simulada = 1.105
+            vel_x = dir_x * velocidad_simulada
+            vel_y = dir_y * velocidad_simulada
+            vel_z = dir_z * velocidad_simulada
+
+            # Ubicamos la nave al 72% del camino con la velocidad correcta apuntando a la Luna
             state_vector.update({
                 "pos": [mx * 0.72, my * 0.72, mz * 0.72], 
-                "vel": [1.105, 0.05, -0.02], 
+                "vel": [vel_x, vel_y, vel_z], 
                 "source": "BUSCANDO SEÑAL DSN (SIM)", 
                 "timestamp": now
             })
