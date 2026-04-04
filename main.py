@@ -4,7 +4,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 import asyncpg
 
-app = FastAPI(title="Artemis II Gateway Node")
+app = FastAPI(title="Artemis II Mission Control")
 DATABASE_URL = os.getenv("DATABASE_URL")
 active_connections = set()
 
@@ -20,7 +20,9 @@ async def startup_event():
     try:
         app.state.db_conn = await asyncpg.connect(DATABASE_URL)
         await app.state.db_conn.add_listener('telemetry_stream', broadcast_telemetry)
-    except Exception as e: print(f"DB Error: {e}")
+        print("CONECTADO A POSTGRES OK")
+    except Exception as e: 
+        print(f"Error DB: {e}")
 
 @app.websocket("/ws/telemetry")
 async def websocket_endpoint(websocket: WebSocket):
@@ -28,7 +30,8 @@ async def websocket_endpoint(websocket: WebSocket):
     active_connections.add(websocket)
     try:
         while True: await websocket.receive_text()
-    except WebSocketDisconnect: active_connections.discard(websocket)
+    except WebSocketDisconnect: 
+        active_connections.discard(websocket)
 
 @app.get("/")
 async def get_frontend():
@@ -38,21 +41,21 @@ async def get_frontend():
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, maximum-scale=1.0">
-        <title>NASA Artemis II | Tactical Control</title>
+        <title>NASA Artemis II | Radar Táctico</title>
         <style>
             @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap');
             :root { --cian: #00f2ff; --orange: #ff4800; --green: #00ff88; }
             body, html { margin:0; padding:0; height:100dvh; background:#000; color:#fff; font-family:'Share Tech Mono',monospace; overflow:hidden; touch-action: none; }
             #layout { display:flex; flex-direction:column; height:100%; }
             #viewport { height:55%; position:relative; border-bottom:1px solid var(--cian); background: #000; overflow: hidden; }
-            #hud { height:45%; padding:15px; background:#010a0c; overflow-y:auto; border-top:1px solid var(--cian); }
+            #hud { height:45%; padding:12px; background:#010a0c; overflow-y:auto; border-top:1px solid var(--cian); box-sizing: border-box; }
             .header-box { position:absolute; top:10px; left:10px; z-index:10; pointer-events:none; }
-            .time-val { font-size:1.5rem; color:var(--cian); text-shadow:0 0 10px var(--cian); }
-            .card { border-left:4px solid var(--cian); background:rgba(255,255,255,0.02); padding:10px; margin-bottom:10px; border-radius: 4px; }
+            .time-val { font-size:1.4rem; color:var(--cian); text-shadow:0 0 10px var(--cian); }
+            .card { border-left:4px solid var(--cian); background:rgba(255,255,255,0.02); padding:8px; margin-bottom:8px; border-radius: 4px; }
             .card.red { border-color: var(--orange); }
-            .row { display:flex; justify-content:space-between; align-items:flex-end; margin-bottom:6px; font-size:0.8rem; border-bottom:1px solid rgba(255,255,255,0.05); padding-bottom:2px;}
+            .row { display:flex; justify-content:space-between; align-items:flex-end; margin-bottom:4px; font-size:0.75rem; border-bottom:1px solid rgba(255,255,255,0.05); padding-bottom:2px;}
             .lbl { color:#888; }
-            .val { font-weight:bold; font-size:1rem; font-variant-numeric:tabular-nums; }
+            .val { font-weight:bold; font-size:0.9rem; font-variant-numeric:tabular-nums; }
             #three-canvas { width:100%; height:100%; display: block; }
         </style>
         <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
@@ -62,26 +65,25 @@ async def get_frontend():
         <div id="layout">
             <div id="viewport">
                 <div class="header-box">
-                    <div style="font-size:0.7rem; font-weight:bold; background:var(--cian); color:#000; display:inline-block; padding:2px 8px; margin-bottom:2px;">● FLIGHT TELEMETRY LINK</div>
+                    <div style="font-size:0.6rem; font-weight:bold; background:var(--cian); color:#000; display:inline-block; padding:2px 5px; margin-bottom:2px;">● LIVE FLIGHT TELEMETRY</div>
                     <div id="clock" class="time-val">00:00:00.000</div>
                 </div>
                 <div id="three-canvas"></div>
             </div>
             <div id="hud">
                 <div class="card red">
-                    <h2 style="margin:0 0 8px 0; font-size:0.8rem; color:var(--orange)">ORION CAPSULE (ARTEMIS II)</h2>
+                    <h2 style="margin:0 0 6px 0; font-size:0.75rem; color:var(--orange)">ARTEMIS II (ORION CAPSULE)</h2>
                     <div class="row"><span class="lbl">VEL. INERCIAL</span> <span class="val" id="v-vel" style="color:var(--orange)">0.000 km/s</span></div>
-                    <div class="row"><span class="lbl">VEL. MACH</span> <span class="val" id="v-mach">0.00 M</span></div>
-                    <div class="row"><span class="lbl">ALTITUD TIERRA</span> <span class="val" id="v-dist-e">0 km</span></div>
-                    <div class="row"><span class="lbl">PROXIMIDAD LUNAR</span> <span class="val" id="v-dist-m">0 km</span></div>
+                    <div class="row"><span class="lbl">ALTITUD (TIERRA)</span> <span class="val" id="v-dist-e">0 km</span></div>
+                    <div class="row"><span class="lbl">PROXIMIDAD (LUNA)</span> <span class="val" id="v-dist-m">0 km</span></div>
                 </div>
                 <div class="card">
-                    <h2 style="margin:0 0 8px 0; font-size:0.8rem; color:var(--cian)">SPATIAL COORDINATES</h2>
+                    <div class="row"><span class="lbl">VEL. MACH</span> <span class="val" id="v-mach">0.00 M</span></div>
                     <div class="row"><span class="lbl">LATENCIA LUZ (IDA)</span> <span class="val" id="v-light">0.000 s</span></div>
-                    <div class="row"><span class="lbl">RA / DEC</span> <span class="val" id="v-coords">0 / 0</span></div>
+                    <div class="row"><span class="lbl">COORD. RA/DEC</span> <span class="val" id="v-coords">0 / 0</span></div>
                 </div>
                 <div class="card" style="border-color:var(--green)">
-                    <div class="row" style="border:none;"><span class="lbl">DATA SOURCE</span> <span class="val green" id="v-source">--</span></div>
+                    <div class="row" style="border:none; margin-bottom:0;"><span class="lbl">FUENTE DE DATOS</span> <span class="val green" id="v-source">--</span></div>
                 </div>
             </div>
         </div>
@@ -164,6 +166,12 @@ async def get_frontend():
             init3D(); connect();
             function animate() { requestAnimationFrame(animate); controls.update(); renderer.render(scene, camera); }
             animate();
+            
+            window.addEventListener('resize', () => {
+                const c = document.getElementById('three-canvas');
+                camera.aspect = c.clientWidth/c.clientHeight; camera.updateProjectionMatrix();
+                renderer.setSize(c.clientWidth, c.clientHeight);
+            });
         </script>
     </body>
     </html>
