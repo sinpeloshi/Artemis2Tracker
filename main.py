@@ -6,7 +6,7 @@ import httpx
 import asyncio
 from datetime import datetime, timedelta
 
-app = FastAPI(title="Artemis 2 - MOC Tactical View")
+app = FastAPI(title="Artemis 2 - NASA Tactical Labels")
 
 # Motor Astronómico
 eph = load('de421.bsp')
@@ -20,7 +20,6 @@ async def fetch_jpl_horizons():
     now_utc = datetime.utcnow()
     t_start = now_utc.strftime('%Y-%m-%d %H:%M')
     t_stop = (now_utc + timedelta(minutes=1)).strftime('%Y-%m-%d %H:%M')
-
     url = "https://ssd.jpl.nasa.gov/api/horizons.api"
     params = {
         "format": "text", "COMMAND": NAIF_ID, "OBJ_DATA": "NO",
@@ -31,34 +30,24 @@ async def fetch_jpl_horizons():
     async with httpx.AsyncClient() as client:
         try:
             response = await client.get(url, params=params, timeout=8.0)
-            data = response.text
-            if "$$SOE" in data:
-                soe = data.find("$$SOE")
-                eoe = data.find("$$EOE")
-                lines = data[soe:eoe].split('\n')
+            if "$$SOE" in response.text:
+                soe = response.text.find("$$SOE")
+                eoe = response.text.find("$$EOE")
+                lines = response.text[soe:eoe].split('\n')
                 for line in lines:
-                    if "X =" in line and "Y =" in line:
+                    if "X =" in line:
                         p = line.split()
-                        x, y, z = float(p[2]), float(p[5]), float(p[8])
-                    elif "VX=" in line and "VY=" in line:
-                        p = line.split()
-                        vx, vy, vz = float(p[1]), float(p[3]), float(p[5])
-                        return {"x": x, "y": y, "z": z, "vx": vx, "vy": vy, "vz": vz}
-        except Exception:
-            return None
+                        return {"x": float(p[2]), "y": float(p[5]), "z": float(p[8]), "vx": 0, "vy": 0, "vz": 0}
+        except: return None
     return None
 
 @app.get("/api/telemetry")
 async def get_telemetry():
     t = ts.now()
     now = datetime.utcnow()
-    
     astrometric_moon = earth_eph.at(t).observe(moon_eph)
-    x_moon, y_moon, z_moon = astrometric_moon.position.km
-    v_moon_x, v_moon_y, v_moon_z = astrometric_moon.velocity.km_per_s
-    
-    dist_moon_earth = math.sqrt(x_moon**2 + y_moon**2 + z_moon**2)
-    vel_moon = math.sqrt(v_moon_x**2 + v_moon_y**2 + v_moon_z**2)
+    mx, my, mz = astrometric_moon.position.km
+    dist_moon_earth = math.sqrt(mx**2 + my**2 + mz**2)
     
     if (now - nasa_cache["last_update"]).total_seconds() > 60:
         jpl = await fetch_jpl_horizons()
@@ -67,24 +56,18 @@ async def get_telemetry():
             nasa_cache["last_update"] = now
 
     orion = nasa_cache["orion_data"]
-    
     if orion:
-        x_orion, y_orion, z_orion = orion["x"], orion["y"], orion["z"]
-        vel_orion = math.sqrt(orion["vx"]**2 + orion["vy"]**2 + orion["vz"]**2)
-        source, status = "DSN/JPL HORIZONS LOCK", "NOMINAL"
+        ox, oy, oz = orion["x"], orion["y"], orion["z"]
+        source, status = "DSN/JPL HORIZONS", "NOMINAL"
     else:
-        x_orion, y_orion, z_orion = x_moon * 0.88, y_moon * 0.88, z_moon * 0.88 + 12500
-        vel_orion = 1.152
-        source, status = "INTERNAL SIM (FAIL-SAFE)", "DEGRADED"
+        ox, oy, oz = mx * 0.88, my * 0.88, mz * 0.88 + 12000
+        source, status = "INTERNAL SIM", "DEGRADED"
 
-    dist_orion_earth = math.sqrt(x_orion**2 + y_orion**2 + z_orion**2)
-    dist_orion_moon = math.sqrt((x_moon-x_orion)**2 + (y_moon-y_orion)**2 + (z_moon-z_orion)**2)
-    
     return {
         "sys_time": t.utc_strftime('%H:%M:%S UTC'),
         "signal": {"source": source, "status": status},
-        "moon": {"x": x_moon, "y": y_moon, "z": z_moon, "dist_km": dist_moon_earth, "v_kms": vel_moon},
-        "orion": {"x": x_orion, "y": y_orion, "z": z_orion, "dist_earth_km": dist_orion_earth, "dist_moon_km": dist_orion_moon, "v_kms": vel_orion}
+        "moon": {"x": mx, "y": my, "z": mz, "dist": dist_moon_earth},
+        "orion": {"x": ox, "y": oy, "z": oz, "dist": math.sqrt(ox**2+oy**2+oz**2), "v": 1.152}
     }
 
 @app.get("/")
@@ -95,29 +78,16 @@ async def get_frontend():
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-        <title>Artemis II | MOC Tactical</title>
+        <title>NASA Artemis 2 | Tactical Radar</title>
         <style>
             @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap');
-            :root { --bg: #020508; --panel-bg: rgba(0, 15, 25, 0.85); --neon-cian: #00ffff; --neon-orange: #ff5500; --neon-green: #00ff88; }
-            body, html { margin: 0; padding: 0; height: 100%; background-color: var(--bg); color: #fff; font-family: 'Share Tech Mono', monospace; overflow: hidden; }
-            body::after { content: " "; display: block; position: fixed; top: 0; left: 0; bottom: 0; right: 0; background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.2) 50%); z-index: 999; background-size: 100% 3px; pointer-events: none;}
-            #dashboard { display: flex; flex-direction: column; height: 100dvh; width: 100vw; position: relative; z-index: 10; pointer-events: none;}
-            
-            .header { height: 50px; display: flex; justify-content: space-between; align-items: center; padding: 0 15px; border-bottom: 1px solid rgba(0,255,255,0.3); background: var(--panel-bg); flex-shrink: 0; pointer-events: auto;}
-            h1 { font-size: 1.1rem; color: var(--neon-cian); margin: 0; text-shadow: 0 0 8px var(--neon-cian); }
-            .dot { display: inline-block; width: 8px; height: 8px; background-color: var(--neon-green); border-radius: 50%; margin-right: 8px; animation: blink 1.2s infinite; }
-            @keyframes blink { 0%, 100% {opacity: 1;} 50% {opacity: 0.2;} }
-            #sys-time { font-weight: bold; font-size: 0.9rem; }
-
-            #telemetry-fido { margin-top: auto; background: var(--panel-bg); border-top: 1px solid rgba(0,255,255,0.3); padding: 15px; pointer-events: auto; max-height: 40dvh; overflow-y: auto;}
-            .data-group { border: 1px solid rgba(0,255,255,0.1); padding: 8px; margin-bottom: 8px; }
-            .data-group h3 { margin: 0 0 5px 0; font-size: 0.8rem; color: #888; border-bottom: 1px dotted #444; padding-bottom: 4px; }
-            .metric { display: flex; justify-content: space-between; font-size: 0.8rem; margin-bottom: 4px; }
-            .metric .label { color: #aaa; }
-            .metric .val { font-weight: 700; color: var(--neon-orange); }
-            .metric .val.green { color: var(--neon-green); }
-
-            #three-container { position: fixed; top: 0; left: 0; width: 100vw; height: 100dvh; z-index: 1; }
+            body, html { margin: 0; padding: 0; height: 100%; background: #000; color: #0ff; font-family: 'Share Tech Mono', monospace; overflow: hidden; }
+            #dashboard { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 10; display: flex; flex-direction: column; }
+            .header { background: rgba(0,20,30,0.8); border-bottom: 1px solid #0ff; padding: 10px 15px; display: flex; justify-content: space-between; pointer-events: auto; }
+            .hud-panel { margin-top: auto; background: rgba(0,20,30,0.8); border-top: 1px solid #0ff; padding: 15px; pointer-events: auto; font-size: 0.8rem; }
+            .metric { display: flex; justify-content: space-between; margin-bottom: 5px; border-bottom: 1px solid rgba(0,255,255,0.1); }
+            .val { color: #fff; font-weight: bold; }
+            #three-container { position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: 1; }
         </style>
         <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
         <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
@@ -126,142 +96,114 @@ async def get_frontend():
         <div id="three-container"></div>
         <div id="dashboard">
             <div class="header">
-                <div style="display: flex; align-items: center;"><span class="dot"></span><h1>RADAR ESPACIAL</h1></div>
-                <div id="sys-time">00:00:00 UTC</div>
+                <div style="color:#0ff; text-shadow:0 0 5px #0ff;">● ARTEMIS 2 TACTICAL</div>
+                <div id="sys-time">00:00:00</div>
             </div>
-            <div id="telemetry-fido">
-                <div class="data-group">
-                    <h3>ESTADO DEL ENLACE</h3>
-                    <div class="metric"><span class="label">FUENTE:</span> <span class="val green" id="v-source">--</span></div>
-                </div>
-                <div class="data-group" style="border-color: rgba(255,85,0,0.3)">
-                    <h3 style="color: var(--neon-orange);">CÁPSULA ORION</h3>
-                    <div class="metric"><span class="label">VELOCIDAD:</span> <span class="val" id="o-vel">0.000 km/s</span></div>
-                    <div class="metric"><span class="label">DIST (TIERRA):</span> <span class="val" id="o-dist-e">0.00 km</span></div>
-                    <div class="metric"><span class="label">DIST (LUNA):</span> <span class="val" id="o-dist-m">0.00 km</span></div>
-                </div>
-                <div class="data-group">
-                    <h3>OBJETIVO LUNAR</h3>
-                    <div class="metric"><span class="label">DIST (TIERRA):</span> <span class="val" style="color:#fff;" id="m-dist">0.00 km</span></div>
-                </div>
+            <div class="hud-panel">
+                <div class="metric"><span>SIGNAL SOURCE</span> <span class="val" id="v-source">--</span></div>
+                <div class="metric"><span>ORION VELOCITY</span> <span class="val" id="o-vel">0.00 km/s</span></div>
+                <div class="metric"><span>EARTH ALTITUDE</span> <span class="val" id="o-dist">0 km</span></div>
             </div>
         </div>
 
         <script>
-            const SCALE = 1000; 
+            const SCALE = 1000;
             let scene, camera, renderer, controls;
             let earth, moon, orion;
-            let orbitLine;
+
+            // FUNCIÓN PARA CREAR ETIQUETAS DE TEXTO 3D (Sprites)
+            function createTextLabel(text, color) {
+                const canvas = document.createElement('canvas');
+                const ctx = canvas.getContext('2d');
+                canvas.width = 256; canvas.height = 64;
+                ctx.fillStyle = color;
+                ctx.font = 'Bold 40px Share Tech Mono';
+                ctx.textAlign = 'center';
+                ctx.fillText(text, 128, 45);
+                
+                const texture = new THREE.CanvasTexture(canvas);
+                const spriteMaterial = new THREE.SpriteMaterial({ map: texture, transparent: true });
+                const sprite = new THREE.Sprite(spriteMaterial);
+                sprite.scale.set(60, 15, 1); // Tamaño de la etiqueta
+                return sprite;
+            }
 
             function initThree() {
                 scene = new THREE.Scene();
-                
-                // CÁMARA: Vista isométrica bien lejana (arriba y atrás) para ver todo el tablero
-                camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 1, 2000000);
-                camera.position.set(0, 450, 600); 
+                camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 1, 5000000);
+                camera.position.set(0, 500, 800);
 
                 renderer = new THREE.WebGLRenderer({ antialias: true });
                 renderer.setSize(window.innerWidth, window.innerHeight);
                 document.getElementById('three-container').appendChild(renderer.domElement);
 
                 controls = new THREE.OrbitControls(camera, renderer.domElement);
-                controls.enableDamping = true; 
-                controls.dampingFactor = 0.05;
+                controls.enableDamping = true;
 
-                scene.add(new THREE.AmbientLight(0x333344)); 
-                const sunLight = new THREE.DirectionalLight(0xffffff, 1.5);
-                sunLight.position.set(-1, 0.5, 1).normalize();
-                scene.add(sunLight);
-
-                // TIERRA: Tamaño exagerado (Radio de 25 en vez de 6)
-                const earthGeo = new THREE.SphereGeometry(25, 32, 32);
-                const earthMat = new THREE.MeshBasicMaterial({ color: 0x00ffff, wireframe: true });
-                earth = new THREE.Mesh(earthGeo, earthMat);
+                // TIERRA + ETIQUETA
+                const earthGeo = new THREE.SphereGeometry(30, 32, 32);
+                earth = new THREE.Mesh(earthGeo, new THREE.MeshBasicMaterial({ color: 0x00ffff, wireframe: true }));
                 scene.add(earth);
+                const earthLabel = createTextLabel("PLANET EARTH", "#00ffff");
+                earthLabel.position.set(0, 45, 0);
+                earth.add(earthLabel);
 
-                // LUNA: Tamaño exagerado (Radio de 12 en vez de 1.7)
-                const moonGeo = new THREE.SphereGeometry(12, 24, 24);
-                const moonMat = new THREE.MeshPhongMaterial({ color: 0xcccccc, flatShading: true });
-                moon = new THREE.Mesh(moonGeo, moonMat);
+                // LUNA + ETIQUETA
+                const moonGeo = new THREE.SphereGeometry(15, 16, 16);
+                moon = new THREE.Mesh(moonGeo, new THREE.MeshBasicMaterial({ color: 0xaaaaaa, wireframe: true }));
                 scene.add(moon);
+                const moonLabel = createTextLabel("LUNAR TARGET", "#ffffff");
+                moonLabel.position.set(0, 25, 0);
+                moon.add(moonLabel);
 
-                // ORION: Tamaño exagerado para que sea visible (Cubo rojo brillante)
-                const orionGeo = new THREE.BoxGeometry(8, 8, 8);
-                const orionMat = new THREE.MeshBasicMaterial({ color: 0xff3300 });
-                orion = new THREE.Mesh(orionGeo, orionMat);
+                // ORION + ETIQUETA
+                const orionGeo = new THREE.BoxGeometry(10, 10, 10);
+                orion = new THREE.Mesh(orionGeo, new THREE.MeshBasicMaterial({ color: 0xff3300 }));
                 scene.add(orion);
+                const orionLabel = createTextLabel("ORION MODULE", "#ff3300");
+                orionLabel.position.set(0, 20, 0);
+                orion.add(orionLabel);
 
-                // LÍNEA DE ÓRBITA LUNAR (Para dar perspectiva del espacio)
-                const orbitGeo = new THREE.RingGeometry(384, 385, 64);
-                const orbitMat = new THREE.MeshBasicMaterial({ color: 0x444444, side: THREE.DoubleSide });
-                orbitLine = new THREE.Mesh(orbitGeo, orbitMat);
-                orbitLine.rotation.x = Math.PI / 2;
-                scene.add(orbitLine);
+                // ÓRBITA LUNAR (Guía visual)
+                const orbit = new THREE.Mesh(new THREE.RingGeometry(384, 386, 64), new THREE.MeshBasicMaterial({ color: 0x333333, side: THREE.DoubleSide }));
+                orbit.rotation.x = Math.PI / 2;
+                scene.add(orbit);
 
-                // ESTRELLAS
-                const starsGeo = new THREE.BufferGeometry();
-                const starsCoords = [];
-                for(let i=0; i<1500; i++) {
-                    starsCoords.push((Math.random()-0.5)*3000, (Math.random()-0.5)*3000, (Math.random()-0.5)*3000);
-                }
-                starsGeo.setAttribute('position', new THREE.Float32BufferAttribute(starsCoords, 3));
-                const starsMat = new THREE.PointsMaterial({color: 0xffffff, size: 2});
-                scene.add(new THREE.Points(starsGeo, starsMat));
-
-                // GRID (Rejilla táctica)
-                const gridHelper = new THREE.GridHelper(1500, 30, 0x004444, 0x001111);
-                scene.add(gridHelper);
+                scene.add(new THREE.GridHelper(2000, 40, 0x002222, 0x001111));
             }
 
-            function animate() {
-                requestAnimationFrame(animate);
-                earth.rotation.y += 0.002;
-                controls.update();
-                renderer.render(scene, camera);
-            }
-
-            async function updateTelemetry() {
+            async function update() {
                 try {
                     const res = await fetch('/api/telemetry');
                     const d = await res.json();
                     
                     document.getElementById('sys-time').innerText = d.sys_time;
                     document.getElementById('v-source').innerText = d.signal.source;
-                    document.getElementById('v-source').style.color = d.signal.status === 'NOMINAL' ? '#00ff88' : '#ffaa00';
-                    
-                    document.getElementById('o-vel').innerText = d.orion.v_kms.toFixed(3) + ' km/s';
-                    document.getElementById('o-dist-e').innerText = d.orion.dist_earth_km.toLocaleString('en-US', {maximumFractionDigits: 0}) + ' km';
-                    document.getElementById('o-dist-m').innerText = d.orion.dist_moon_km.toLocaleString('en-US', {maximumFractionDigits: 0}) + ' km';
-                    document.getElementById('m-dist').innerText = d.moon.dist_km.toLocaleString('en-US', {maximumFractionDigits: 0}) + ' km';
+                    document.getElementById('o-vel').innerText = d.orion.v + " km/s";
+                    document.getElementById('o-dist').innerText = d.orion.dist.toLocaleString() + " km";
 
-                    const mx = d.moon.x / SCALE;
-                    const mz = d.moon.z / SCALE;
-                    const my = -d.moon.y / SCALE;
-
-                    const ox = d.orion.x / SCALE;
-                    const oz = d.orion.z / SCALE;
-                    const oy = -d.orion.y / SCALE;
+                    const mx = d.moon.x / SCALE, mz = d.moon.z / SCALE, my = -d.moon.y / SCALE;
+                    const ox = d.orion.x / SCALE, oz = d.orion.z / SCALE, oy = -d.orion.y / SCALE;
 
                     moon.position.set(mx, mz, my);
                     orion.position.set(ox, oz, oy);
 
-                    // MAGIA DE CÁMARA: El centro de control ahora apunta al centro de la acción
-                    // En lugar de mirar a la Tierra (0,0,0), miramos al punto medio entre la Tierra y la nave.
+                    // CENTRADO DINÁMICO: La cámara enfoca el punto medio entre la Tierra y Orion
                     controls.target.set(ox / 2, oz / 2, oy / 2);
 
-                } catch (err) { console.error(err); }
+                } catch (e) {}
             }
 
-            window.addEventListener('resize', () => {
-                camera.aspect = window.innerWidth / window.innerHeight;
-                camera.updateProjectionMatrix();
-                renderer.setSize(window.innerWidth, window.innerHeight);
-            });
+            function animate() {
+                requestAnimationFrame(animate);
+                controls.update();
+                renderer.render(scene, camera);
+            }
 
             initThree();
             animate();
-            updateTelemetry();
-            setInterval(updateTelemetry, 3000);
+            setInterval(update, 3000);
+            update();
         </script>
     </body>
     </html>
