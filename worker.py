@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from skyfield.api import load
 import asyncpg
 
-print("INICIANDO MOTOR FÍSICO (TRACKING LRO - DATOS REALES)...")
+print("INICIANDO MOTOR FÍSICO (TRACKING ORION ARTEMIS II - DATOS REALES)...")
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
@@ -25,14 +25,15 @@ async def fetch_nasa_jpl():
     t_stop = (now + timedelta(minutes=2)).strftime('%Y-%m-%d %H:%M')
     url = "https://ssd.jpl.nasa.gov/api/horizons.api"
     
-    # ID -85: Lunar Reconnaissance Orbiter (Misión REAL activa en la Luna)
+    # ID -121: Cápsula Orion (Misión Artemis II EN VUELO)
     params = {
-        "format": "text", "COMMAND": "-85", "OBJ_DATA": "NO",
+        "format": "text", "COMMAND": "-121", "OBJ_DATA": "NO",
         "MAKE_EPHEM": "YES", "EPHEM_TYPE": "VECTORS", "CENTER": "399",
         "START_TIME": t_start, "STOP_TIME": t_stop, "STEP_SIZE": "1m",
         "OUT_UNITS": "KM-S", "VEC_TABLE": "2"
     }
 
+    # Camuflaje para el firewall de JPL
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36"
     }
@@ -52,7 +53,7 @@ async def fetch_nasa_jpl():
                         state_vector["pos"] = [x, y, z]
                         state_vector["vel"] = [vx, vy, vz]
                         state_vector["timestamp"] = now
-                        state_vector["source"] = "NASA JPL HORIZONS (LIVE LRO DATA)"
+                        state_vector["source"] = "NASA JPL HORIZONS (LIVE ORION DATA)"
                         print("¡DATOS REALES RECIBIDOS DE LA NASA!")
                         return True
         except Exception as e:
@@ -77,10 +78,11 @@ async def physics_loop():
         mx, my, mz = [float(c) for c in ast_moon.position.km]
         sx, sy, sz = [float(c) for c in earth_eph.at(t).observe(sun_eph).position.km]
 
+        # Si perdemos señal, fallback visualmente a mitad de camino Tierra-Luna (por el día de vuelo actual)
         if state_vector["pos"] is None:
-            state_vector["pos"] = [mx, my, mz + 5000] # Orbitando cerca de la luna
+            state_vector["pos"] = [mx * 0.5, my * 0.5, mz * 0.5] 
             state_vector["vel"] = [1.5, 0.0, 0.0]
-            state_vector["source"] = "BUSCANDO SEÑAL..."
+            state_vector["source"] = "BUSCANDO SEÑAL DE ORION..."
             state_vector["timestamp"] = now
 
         dt = (now - state_vector["timestamp"]).total_seconds()
@@ -93,11 +95,10 @@ async def physics_loop():
         dist_e = math.sqrt(ox**2 + oy**2 + oz**2)
         dist_m = math.sqrt((mx-ox)**2 + (my-oy)**2 + (mz-oz)**2)
         
-        # MÁS DATOS REALES:
-        light_time = dist_e / 299792.458 # Segundos que tarda la señal en llegar a la Tierra
-        mach_speed = v_mag * 3600 / 1234.8 # Velocidad relativa en Mach
+        # MÉTICAS TÁCTICAS
+        light_time = dist_e / 299792.458 
+        mach_speed = v_mag * 3600 / 1234.8 
         
-        # Matemáticas para Ascensión Recta y Declinación
         declination = math.degrees(math.asin(oz / dist_e))
         right_ascension = math.degrees(math.atan2(oy, ox)) % 360
 
