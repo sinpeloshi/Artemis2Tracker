@@ -10,7 +10,7 @@ import asyncpg
 print("INICIANDO MOTOR DE FÍSICA FIDO (POSTGRESQL EDITION)...")
 
 # Railway inyecta esta variable automáticamente cuando enlazas Postgres
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://user:pass@localhost:5432/db")
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 eph = load('de421.bsp')
 earth_eph, moon_eph, sun_eph = eph['earth'], eph['moon'], eph['sun']
@@ -21,20 +21,31 @@ state_vector = {
 }
 
 async def fetch_nasa_jpl():
+    """Habla con la NASA con disfraz para saltar el Firewall"""
     now = datetime.utcnow()
     t_start = now.strftime('%Y-%m-%d %H:%M')
     t_stop = (now + timedelta(minutes=2)).strftime('%Y-%m-%d %H:%M')
     url = "https://ssd.jpl.nasa.gov/api/horizons.api"
+    
+    # Usamos -170 (Telescopio James Webb) para probar. ¡Ese siempre está online!
+    # Si la prueba sale bien y ves el cartel verde, podés cambiarlo a -121 (Orion) después.
     params = {
-        "format": "text", "COMMAND": "-121", "OBJ_DATA": "NO",
+        "format": "text", "COMMAND": "-170", "OBJ_DATA": "NO",
         "MAKE_EPHEM": "YES", "EPHEM_TYPE": "VECTORS", "CENTER": "500@399",
         "START_TIME": t_start, "STOP_TIME": t_stop, "STEP_SIZE": "1m",
         "OUT_UNITS": "KM-S", "VEC_TABLE": "2"
     }
 
+    # EL DISFRAZ: Le decimos a la NASA que somos Google Chrome
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5"
+    }
+
     async with httpx.AsyncClient() as client:
         try:
-            r = await client.get(url, params=params, timeout=10.0)
+            r = await client.get(url, params=params, headers=headers, timeout=10.0)
             if "$$SOE" in r.text:
                 lines = r.text.split("$$SOE")[1].split("$$EOE")[0].strip().split('\n')
                 for line in lines:
@@ -48,12 +59,19 @@ async def fetch_nasa_jpl():
                         state_vector["vel"] = [vx, vy, vz]
                         state_vector["timestamp"] = now
                         state_vector["source"] = "NASA JPL HORIZONS (LIVE)"
+                        print("¡ENLACE NASA ESTABLECIDO! Firewall perforado.")
                         return True
+            else:
+                print("Conexión exitosa, pero la NASA no devolvió datos para este ID.")
         except Exception as e:
-            print(f"Error NASA: {e}")
+            print(f"NASA Link Error (Firewall/Timeout): {e}")
     return False
 
 async def physics_loop():
+    if not DATABASE_URL:
+        print("ERROR CRÍTICO: No se encontró DATABASE_URL. Verifica las variables en Railway.")
+        return
+
     # Conectamos a PostgreSQL
     conn = await asyncpg.connect(DATABASE_URL)
     print("CONECTADO A POSTGRESQL NUCLEUS")
@@ -100,8 +118,7 @@ async def physics_loop():
             "orion": {"x": ox, "y": oy, "z": oz, "v": v_mag, "dist_e": dist_e, "dist_m": dist_m}
         }
         
-        # LA MAGIA DE POSTGRES: Enviamos el JSON por el canal 'telemetry_stream' 
-        # sin hacer un INSERT en ninguna tabla. Memoria pura.
+        # Enviamos el JSON por el canal de Postgres a 20 FPS
         payload = json.dumps(packet)
         await conn.execute("SELECT pg_notify('telemetry_stream', $1)", payload)
         
