@@ -1,9 +1,8 @@
 #!/bin/bash
 
-echo "Iniciando Motor de Física FIDO en segundo plano (PostgreSQL Worker)..."
-# El '&' al final manda este proceso a correr de fondo
+echo "Arrancando Sistema Artemis II - Master Control..."
+# Arranca el motor de física en segundo plano
 python worker.py &
 
-echo "Iniciando Gateway de Comunicaciones (FastAPI)..."
-# Este comando corre al frente y sirve la web a los usuarios
+# Arranca el servidor web al frente
 uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}
