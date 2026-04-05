@@ -9,7 +9,8 @@ import asyncpg
 
 print("--- [SISTEMA CRÍTICO] INICIANDO MASTER PHYSICS ENGINE (V4) ---")
 
-DATABASE_URL = os.getenv("DATABASE_URL")
+# CAMBIO APLICADO: Ahora busca la variable DATABASE_ARTEMIS
+DATABASE_URL = os.getenv("DATABASE_ARTEMIS")
 eph = load('de421.bsp')
 earth_eph, moon_eph, sun_eph = eph['earth'], eph['moon'], eph['sun']
 ts = load.timescale()
@@ -20,7 +21,6 @@ LAUNCH_DATE = datetime(2026, 4, 1, 0, 0, 0)
 state_vector = {"pos": None, "vel": None, "timestamp": datetime.utcnow(), "source": "INIT"}
 
 async def fetch_nasa_jpl():
-    """Perforadora de Firewall de JPL con disfraz de alta fidelidad"""
     now = datetime.utcnow()
     t_start = now.strftime('%Y-%m-%d %H:%M')
     t_stop = (now + timedelta(minutes=1)).strftime('%Y-%m-%d %H:%M')
@@ -65,7 +65,7 @@ async def nasa_update_loop():
 
 async def physics_loop():
     if not DATABASE_URL:
-        print("ERROR: DATABASE_URL no configurada.")
+        print("ERROR CRÍTICO: Variable DATABASE_ARTEMIS no encontrada en el entorno.")
         return
 
     conn = await asyncpg.connect(DATABASE_URL)
@@ -75,14 +75,12 @@ async def physics_loop():
         t = ts.now()
         now = datetime.utcnow()
         
-        # Posiciones astronómicas reales
         ast_moon = earth_eph.at(t).observe(moon_eph).position.km
         mx, my, mz = [float(c) for c in ast_moon]
         ast_sun = earth_eph.at(t).observe(sun_eph).position.km
         sx, sy, sz = [float(c) for c in ast_sun]
 
         if state_vector["pos"] is None:
-            # Fallback cinemático (Día 4-5 de misión)
             dist_luna_total = math.sqrt(mx**2 + my**2 + mz**2)
             dir_x, dir_y, dir_z = mx / dist_luna_total, my / dist_luna_total, mz / dist_luna_total
             state_vector.update({
@@ -93,50 +91,38 @@ async def physics_loop():
 
         dt = (now - state_vector["timestamp"]).total_seconds()
         
-        # Dead Reckoning inercial
         ox = state_vector["pos"][0] + (state_vector["vel"][0] * dt)
         oy = state_vector["pos"][1] + (state_vector["vel"][1] * dt)
         oz = state_vector["pos"][2] + (state_vector["vel"][2] * dt)
         ovx, ovy, ovz = state_vector["vel"][0], state_vector["vel"][1], state_vector["vel"][2]
         
-        # Métrica Geocéntrica Básica
         dist_e = math.sqrt(ox**2 + oy**2 + oz**2)
         dist_m = math.sqrt((mx-ox)**2 + (my-oy)**2 + (mz-oz)**2)
         v_mag = math.sqrt(ovx**2 + ovy**2 + ovz**2)
         
-        # --- NUEVA MATEMÁTICA SELENOCÉNTRICA (Luna) ---
-        # 1. Vector Posición Relativo a la Luna (L-J2000)
         lx, ly, lz = ox - mx, oy - my, oz - mz
         
-        # 2. Vector Velocidad Relativo a la Luna
-        # Necesitamos la velocidad de la Luna (vM) para calcular vRel = vShip - vM.
-        # Skyfield lo da en AU/día, convertimos a km/s.
         v_moon = earth_eph.at(t).observe(moon_eph).velocity.km_per_s
         vmx, vmy, vmz = [float(c) for c in v_moon]
         lvx, lvy, lvz = ovx - vmx, ovy - vmy, ovz - vmz
         v_rel_luna = math.sqrt(lvx**2 + lvy**2 + lvz**2)
 
-        # 3. Coordenadas Selenográficas (Lat/Lon) - Aproximación J2000
         lon_luna = math.degrees(math.atan2(ly, lx)) % 360
-        lat_luna = math.degrees(math.asin(lz / dist_m))
+        lat_luna = math.degrees(math.asin(lz / dist_m)) if dist_m > 0 else 0
 
-        # --- FÍSICA AMBIENTAL AVANZADA ---
-        # 1. Ángulo de Fase Lunar (visto por la nave)
-        # Vector Sol-Luna y Vector Nave-Luna. Ángulo entre ellos.
-        smx, smy, smz = mx - sx, my - sy, mz - sz # Vector Sol->Luna
+        smx, smy, smz = mx - sx, my - sy, mz - sz
         dist_sm = math.sqrt(smx**2 + smy**2 + smz**2)
-        v_sol_luna_u = [smx/dist_sm, smy/dist_sm, smz/dist_sm]
-        v_nave_luna_u = [lx/dist_m, ly/dist_m, lz/dist_m]
-        
-        # Producto punto para el ángulo
-        dot_phase = sum(s*n for s,n in zip(v_sol_luna_u, v_nave_luna_u))
-        phase_angle = math.degrees(math.acos(max(-1, min(1, dot_phase))))
+        if dist_sm > 0 and dist_m > 0:
+            v_sol_luna_u = [smx/dist_sm, smy/dist_sm, smz/dist_sm]
+            v_nave_luna_u = [lx/dist_m, ly/dist_m, lz/dist_m]
+            dot_phase = sum(s*n for s,n in zip(v_sol_luna_u, v_nave_luna_u))
+            phase_angle = math.degrees(math.acos(max(-1, min(1, dot_phase))))
+        else:
+            phase_angle = 0
 
-        # CÁLCULO MET
         delta = now - LAUNCH_DATE
         met_str = f"T+ {delta.days:02d}:{delta.seconds // 3600:02d}:{(delta.seconds // 60) % 60:02d}:{delta.seconds % 60:02d}"
 
-        # FASE DE VUELO LÓGICA
         flight_phase = "OUTBOUND COAST"
         if dist_e < 15000: flight_phase = "EARTH ORBIT"
         elif dist_m < 80000: flight_phase = "LUNAR APPROACH"
@@ -149,15 +135,11 @@ async def physics_loop():
             "phase": flight_phase,
             "moon": {"x": mx, "y": my, "z": mz},
             "ship": {
-                # Datos Inerciales J2000
                 "x": ox, "y": oy, "z": oz, 
                 "vx": ovx, "vy": ovy, "vz": ovz, "v": v_mag,
-                # Datos Relativos a la Tierra
                 "dist_e": dist_e, "light_e": dist_e / 299792.458,
-                # Datos Relativos a la Luna (Selocéntricos)
                 "dist_m": dist_m, "v_rel_m": v_rel_luna,
                 "lat_m": lat_luna, "lon_m": lon_luna,
-                # Datos Ambientales
                 "phase_angle": phase_angle,
                 "mach": v_mag * 3600 / 1234.8,
                 "dec": math.degrees(math.asin(oz / dist_e)) if dist_e > 0 else 0,
