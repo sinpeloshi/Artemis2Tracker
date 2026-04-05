@@ -133,6 +133,11 @@ async def get_frontend():
             const SCALE = 1000;
             let scene, camera, renderer, controls;
             let earth, moon, orion;
+            
+            // Variables para la Estela de Trayectoria
+            let trailGeometry, trailLine;
+            const trailPoints = [];
+            const MAX_TRAIL_LENGTH = 1000; // Recuerda los últimos 1000 puntos en el espacio
 
             function createLabel(text, color) {
                 const canvas = document.createElement('canvas');
@@ -196,6 +201,17 @@ async def get_frontend():
                 const oLbl = createLabel("ORION", "#ff4800"); oLbl.position.y = 15; orion.add(oLbl);
                 scene.add(orion);
 
+                // Configuración de la Estela Roja (Trayectoria)
+                trailGeometry = new THREE.BufferGeometry();
+                const trailMaterial = new THREE.LineBasicMaterial({ 
+                    color: 0xff0000, // Rojo intenso
+                    linewidth: 2, 
+                    transparent: true, 
+                    opacity: 0.6 
+                });
+                trailLine = new THREE.Line(trailGeometry, trailMaterial);
+                scene.add(trailLine);
+
                 const starsGeo = new THREE.BufferGeometry();
                 const starsCoords = [];
                 for(let i=0; i<1500; i++){ starsCoords.push((Math.random()-0.5)*5000, (Math.random()-0.5)*5000, (Math.random()-0.5)*5000); }
@@ -216,21 +232,17 @@ async def get_frontend():
                 const ws = new WebSocket((window.location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + window.location.host + '/ws/telemetry');
                 ws.onmessage = (e) => {
                     const d = JSON.parse(e.data);
-                    // Actualización de Tiempos y Estado
                     document.getElementById('clock').innerText = d.time;
                     document.getElementById('met-clock').innerText = "MET " + d.met;
                     document.getElementById('v-phase').innerText = d.phase;
                     
-                    // Actualización de Enlace
                     document.getElementById('v-source').innerText = d.source;
                     document.getElementById('v-source').style.color = d.source.includes("LIVE") ? "#0f0" : "#ffaa00";
                     
-                    // PANEL 1: Estado General
                     document.getElementById('v-vel').innerText = d.ship.v.toFixed(5) + " km/s";
                     document.getElementById('v-dist-e').innerText = Math.round(d.ship.dist_e).toLocaleString() + " km";
                     document.getElementById('v-dist-m').innerText = Math.round(d.ship.dist_m).toLocaleString() + " km";
                     
-                    // PANEL 2: Vectores J2000
                     document.getElementById('v-x').innerText = d.ship.x.toFixed(2);
                     document.getElementById('v-y').innerText = d.ship.y.toFixed(2);
                     document.getElementById('v-z').innerText = d.ship.z.toFixed(2);
@@ -238,13 +250,11 @@ async def get_frontend():
                     document.getElementById('v-vy').innerText = d.ship.vy.toFixed(5);
                     document.getElementById('v-vz').innerText = d.ship.vz.toFixed(5);
 
-                    // PANEL 3: Estado Lunar
                     document.getElementById('v-vrel-m').innerText = d.ship.v_rel_m.toFixed(5) + " km/s";
                     document.getElementById('v-lat-m').innerText = d.ship.lat_m.toFixed(2) + "°";
                     document.getElementById('v-lon-m').innerText = d.ship.lon_m.toFixed(2) + "°";
                     document.getElementById('v-phase-angle').innerText = d.ship.phase_angle.toFixed(2) + "°";
 
-                    // PANEL 4: Ambiental
                     document.getElementById('v-mach').innerText = d.ship.mach.toLocaleString(undefined,{maximumFractionDigits:2}) + " M";
                     document.getElementById('v-light').innerText = d.ship.light_e.toFixed(4) + " s";
                     document.getElementById('v-coords').innerText = d.ship.ra.toFixed(2) + "° RA / " + d.ship.dec.toFixed(2) + "° DEC";
@@ -254,6 +264,14 @@ async def get_frontend():
                     
                     orion.position.set(ox, oz, oy); 
                     moon.position.set(mx, mz, my);
+                    
+                    // --- ACTUALIZAR LA ESTELA ---
+                    trailPoints.push(new THREE.Vector3(ox, oz, oy));
+                    if (trailPoints.length > MAX_TRAIL_LENGTH) {
+                        trailPoints.shift(); // Borra el punto más viejo para no saturar la memoria
+                    }
+                    trailGeometry.setFromPoints(trailPoints); // Dibuja la línea nueva
+
                     controls.target.set(ox/2, oz/2, oy/2);
                 };
                 ws.onclose = () => setTimeout(connect, 1000);
