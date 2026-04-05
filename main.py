@@ -128,6 +128,14 @@ HTML = """<!DOCTYPE html>
     #src-badge.cached { color: #ffcc00; background: #ffcc0018; }
     #src-badge.init   { color: #888;    background: #88888818; }
 
+    /* ── Etiquetas 3D ── */
+    .lbl3d {
+      position: absolute; pointer-events: none;
+      font-size: 10px; letter-spacing: .1em; color: #ffffff88;
+      transform: translateX(-50%); white-space: nowrap;
+      text-shadow: 0 0 6px #000;
+    }
+
     /* ── Canvas Three.js ── */
     #three-canvas canvas { display: block; }
 
@@ -148,6 +156,9 @@ HTML = """<!DOCTYPE html>
     <div class="utc"  id="clock">--:--:-- UTC</div>
   </div>
   <div id="src-badge" class="init">INIT</div>
+  <div id="lbl-earth" class="lbl3d">TIERRA</div>
+  <div id="lbl-moon"  class="lbl3d">LUNA</div>
+  <div id="lbl-orion" class="lbl3d" style="color:#ff6030cc">ORION</div>
   <div id="three-canvas"></div>
 </div>
 
@@ -205,281 +216,246 @@ HTML = """<!DOCTYPE html>
 </div>
 
 <script>
-/* ─────────────────────────────────────────────────────────────────────
-   Constantes
-───────────────────────────────────────────────────────────────────── */
-const SCALE       = 800;   // km → unidades Three.js  (400 000 km → 500 u)
-const TRAIL_MAX   = 1000;  // puntos en la estela de la nave
-// Radios VISUALES (exagerados para visibilidad — posiciones siguen siendo reales)
-const EARTH_R_VIS = 38;    // ~5× respecto a escala real
-const MOON_R_VIS  = 18;    // ~7× respecto a escala real
-const ORION_SCALE = 5.5;   // factor de escala de la cápsula
+/* ═══════════════════════════════════════════════════════════════════
+   DISPLAY DESIGN
+   Las posiciones J2000 reales se usan SOLO para el HUD (km exactos).
+   Para la escena 3D usamos posiciones normalizadas:
+     • Tierra  → siempre en el origen (0,0,0)
+     • Luna    → siempre a DISPLAY_DIST unidades, dirección real J2000
+     • Orion   → interpolado proporcional a dist_e / (dist_e + dist_m)
+   Así los tres cuerpos son siempre visibles sin importar la distancia.
+═══════════════════════════════════════════════════════════════════ */
+const DISPLAY_DIST = 440;   // distancia visual Tierra-Luna (unidades)
+const EARTH_R      = 40;    // radio visual Tierra
+const MOON_R       = 20;    // radio visual Luna
+const S            = 6;     // escala Orion
+const TRAIL_MAX    = 900;
 
-/* ─────────────────────────────────────────────────────────────────────
-   Three.js — escena
-───────────────────────────────────────────────────────────────────── */
 let scene, camera, renderer, controls;
 let meshEarth, meshMoon, meshOrion, meshClouds;
-let trailLine = null;
-const trailPositions = [];
+let trailLine = null, pathLine = null;
+const trail = [];
 
-function geo2three(x, y, z) {
-  // J2000 geocéntrico → Three.js: X=X, Y=Z, Z=-Y
-  return new THREE.Vector3(x / SCALE, z / SCALE, -y / SCALE);
+/* ── J2000 dirección → Vector3 Three.js ─────────────────────────── */
+function j2dir(x, y, z) {
+  const len = Math.sqrt(x*x + y*y + z*z) || 1;
+  return new THREE.Vector3(x/len, z/len, -y/len);   // J2000→Three.js: Y↔Z, invertir Y
 }
 
+/* ── Inicializar escena ──────────────────────────────────────────── */
 function initScene() {
-  const container = document.getElementById('three-canvas');
-  const w = container.clientWidth  || window.innerWidth;
-  const h = container.clientHeight || window.innerHeight * 0.45;
+  const el = document.getElementById('three-canvas');
+  const w = el.clientWidth  || window.innerWidth;
+  const h = el.clientHeight || window.innerHeight * 0.45;
 
-  scene    = new THREE.Scene();
-  camera   = new THREE.PerspectiveCamera(50, w / h, 0.1, 2000000);
-  camera.position.set(0, 120, 280);
+  scene  = new THREE.Scene();
+  camera = new THREE.PerspectiveCamera(52, w/h, 0.5, 5000000);
+  camera.position.set(120, 90, 420);   // vista inicial: ve Tierra y puede ver Luna
 
   renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
   renderer.setSize(w, h);
-  renderer.setPixelRatio(window.devicePixelRatio);
-  container.appendChild(renderer.domElement);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  el.appendChild(renderer.domElement);
 
   controls = new THREE.OrbitControls(camera, renderer.domElement);
-  controls.enableDamping = true;
-  controls.dampingFactor = 0.08;
+  controls.enableDamping  = true;
+  controls.dampingFactor  = 0.07;
+  controls.minDistance    = 15;
+  controls.maxDistance    = 1800;
 
-  // Luces
-  scene.add(new THREE.AmbientLight(0x334455, 1.2));
-  const sun = new THREE.DirectionalLight(0xffffff, 1.8);
-  sun.position.set(3000, 1000, 2000);
+  /* ── Iluminación ── */
+  scene.add(new THREE.AmbientLight(0x223344, 1.6));
+  const sun = new THREE.DirectionalLight(0xfff5ee, 2.2);
+  sun.position.set(4000, 1500, 2000);
   scene.add(sun);
 
-  // Tierra
-  const texLoader = new THREE.TextureLoader();
-  const earthGeo  = new THREE.SphereGeometry(EARTH_R_VIS, 64, 64);
-  const earthMat  = new THREE.MeshPhongMaterial({
-    map:      texLoader.load('https://unpkg.com/three-globe/example/img/earth-blue-marble.jpg',
-                             undefined,
-                             undefined,
-                             () => earthMat.color.set(0x1a5090)),
-    specularMap: texLoader.load('https://unpkg.com/three-globe/example/img/earth-water.png'),
-    specular: new THREE.Color(0x333333),
-    shininess: 15,
-  });
-  meshEarth = new THREE.Mesh(earthGeo, earthMat);
+  /* ── Texturas lazy (no bloquean el render) ── */
+  const tl = new THREE.TextureLoader();
+  const lt = (url, cb) => tl.load(url, cb, undefined, () => {});
+
+  /* ── Tierra ── */
+  const earthMat = new THREE.MeshPhongMaterial({
+    color: 0x1a5090, specular: 0x333333, shininess: 20 });
+  lt('https://unpkg.com/three-globe/example/img/earth-blue-marble.jpg',
+     t => { earthMat.map = t; earthMat.color.set(0xffffff); earthMat.needsUpdate = true; });
+  lt('https://unpkg.com/three-globe/example/img/earth-water.png',
+     t => { earthMat.specularMap = t; earthMat.needsUpdate = true; });
+  meshEarth = new THREE.Mesh(new THREE.SphereGeometry(EARTH_R, 64, 64), earthMat);
   scene.add(meshEarth);
 
-  // Nubes sobre la Tierra
-  const cloudGeo = new THREE.SphereGeometry(EARTH_R_VIS * 1.012, 64, 64);
-  const cloudMat = new THREE.MeshPhongMaterial({
-    map: texLoader.load('https://unpkg.com/three-globe/example/img/earth-clouds.png'),
-    transparent: true, opacity: 0.35, depthWrite: false,
-  });
-  meshClouds = new THREE.Mesh(cloudGeo, cloudMat);
+  /* ── Nubes ── */
+  const cloudMat = new THREE.MeshPhongMaterial({ transparent: true, opacity: 0, depthWrite: false });
+  lt('https://unpkg.com/three-globe/example/img/earth-clouds.png',
+     t => { cloudMat.map = t; cloudMat.opacity = 0.32; cloudMat.needsUpdate = true; });
+  meshClouds = new THREE.Mesh(new THREE.SphereGeometry(EARTH_R * 1.014, 64, 64), cloudMat);
   scene.add(meshClouds);
 
-  // Atmósfera (glow)
-  const glowGeo = new THREE.SphereGeometry(EARTH_R_VIS * 1.08, 64, 64);
-  const glowMat = new THREE.MeshBasicMaterial({
-    color: 0x0044ff, transparent: true, opacity: 0.07, side: THREE.BackSide
-  });
-  scene.add(new THREE.Mesh(glowGeo, glowMat));
+  /* ── Atmósfera ── */
+  scene.add(new THREE.Mesh(
+    new THREE.SphereGeometry(EARTH_R * 1.1, 48, 48),
+    new THREE.MeshBasicMaterial({ color: 0x0044cc, transparent: true, opacity: 0.055, side: THREE.BackSide })
+  ));
 
-  // Luna
-  const moonGeo = new THREE.SphereGeometry(MOON_R_VIS, 48, 48);
-  const moonMat = new THREE.MeshStandardMaterial({
-    map: texLoader.load('https://unpkg.com/three-globe/example/img/moon_1k.jpg',
-                        undefined, undefined,
-                        () => moonMat.color.set(0x888888)),
-    roughness: 0.95, metalness: 0.0,
-  });
-  meshMoon = new THREE.Mesh(moonGeo, moonMat);
+  /* ── Luna ── */
+  const moonMat = new THREE.MeshStandardMaterial({ color: 0x888888, roughness: 0.95 });
+  lt('https://unpkg.com/three-globe/example/img/moon_1k.jpg',
+     t => { moonMat.map = t; moonMat.color.set(0xffffff); moonMat.needsUpdate = true; });
+  meshMoon = new THREE.Mesh(new THREE.SphereGeometry(MOON_R, 48, 48), moonMat);
+  meshMoon.position.set(DISPLAY_DIST, 0, 0);   // posición inicial hasta que llegue telemetría
   scene.add(meshMoon);
 
-  // Orion — misma geometría pero escalada con ORION_SCALE
-  const orionGroup = new THREE.Group();
-  const capsulaGeo = new THREE.ConeGeometry(1.8 * ORION_SCALE, 4 * ORION_SCALE, 8);
-  const capsMat    = new THREE.MeshStandardMaterial({ color: 0xddddcc, metalness: 0.5, roughness: 0.4 });
-  const modServGeo = new THREE.CylinderGeometry(1.8 * ORION_SCALE, 1.8 * ORION_SCALE, 3.5 * ORION_SCALE, 8);
-  const modMat     = new THREE.MeshStandardMaterial({ color: 0x888880, metalness: 0.6, roughness: 0.5 });
-  const capsula    = new THREE.Mesh(capsulaGeo, capsMat);
-  const modServ    = new THREE.Mesh(modServGeo, modMat);
-  capsula.position.y =  3.75 * ORION_SCALE;
-  modServ.position.y = -1.75 * ORION_SCALE;
-  orionGroup.add(capsula, modServ);
-
-  // Paneles solares escalados
-  const panelGeo = new THREE.BoxGeometry(12 * ORION_SCALE, 0.2 * ORION_SCALE, 2.5 * ORION_SCALE);
-  const panelMat = new THREE.MeshStandardMaterial({ color: 0x2266aa, metalness: 0.3, roughness: 0.6 });
-  [-7 * ORION_SCALE, 7 * ORION_SCALE].forEach(px => {
-    const p = new THREE.Mesh(panelGeo, panelMat);
+  /* ── Orion ── */
+  const grp = new THREE.Group();
+  const capMat = new THREE.MeshStandardMaterial({ color: 0xddddcc, metalness: 0.5, roughness: 0.4 });
+  const smMat  = new THREE.MeshStandardMaterial({ color: 0x888880, metalness: 0.6, roughness: 0.5 });
+  const panMat = new THREE.MeshStandardMaterial({ color: 0x1a5faa, metalness: 0.3, roughness: 0.5 });
+  const cap = new THREE.Mesh(new THREE.ConeGeometry(1.8*S, 4.5*S, 8), capMat);
+  const sm  = new THREE.Mesh(new THREE.CylinderGeometry(1.8*S, 1.8*S, 4*S, 8), smMat);
+  cap.position.y =  4.5*S;
+  sm.position.y  = -2.0*S;
+  grp.add(cap, sm);
+  [-7.5*S, 7.5*S].forEach(px => {
+    const p = new THREE.Mesh(new THREE.BoxGeometry(13*S, 0.3*S, 3*S), panMat);
     p.position.set(px, 0, 0);
-    orionGroup.add(p);
+    grp.add(p);
   });
-  meshOrion = orionGroup;
+  meshOrion = grp;
+  meshOrion.position.set(DISPLAY_DIST * 0.6, 0, 0);  // posición inicial
   scene.add(meshOrion);
 
-  // Grid de fondo
-  const grid = new THREE.GridHelper(3000, 30, 0x001a22, 0x000d11);
-  grid.position.y = -50;
-  scene.add(grid);
+  /* ── Línea de trayectoria Tierra→Luna (se actualiza con datos) ── */
+  const pathGeo = new THREE.BufferGeometry().setFromPoints([
+    new THREE.Vector3(0,0,0), new THREE.Vector3(DISPLAY_DIST, 0, 0)
+  ]);
+  pathLine = new THREE.Line(pathGeo,
+    new THREE.LineBasicMaterial({ color: 0x00f2ff, transparent: true, opacity: 0.12 }));
+  scene.add(pathLine);
 
-  // Stars
-  const starGeo = new THREE.BufferGeometry();
-  const starVerts = [];
-  for (let i = 0; i < 8000; i++) {
-    starVerts.push(
-      (Math.random() - 0.5) * 4000,
-      (Math.random() - 0.5) * 4000,
-      (Math.random() - 0.5) * 4000
-    );
-  }
-  starGeo.setAttribute('position', new THREE.Float32BufferAttribute(starVerts, 3));
-  scene.add(new THREE.Points(starGeo, new THREE.PointsMaterial({ color: 0xffffff, size: 0.5 })));
+  /* ── Estrellas ── */
+  const sv = [];
+  for (let i = 0; i < 12000; i++)
+    sv.push((Math.random()-.5)*7000, (Math.random()-.5)*7000, (Math.random()-.5)*7000);
+  const sg = new THREE.BufferGeometry();
+  sg.setAttribute('position', new THREE.Float32BufferAttribute(sv, 3));
+  scene.add(new THREE.Points(sg, new THREE.PointsMaterial({ color: 0xffffff, size: 0.55 })));
 
   window.addEventListener('resize', onResize);
 }
 
 function onResize() {
-  const container = document.getElementById('three-canvas');
-  const w = container.clientWidth;
-  const h = container.clientHeight;
-  camera.aspect = w / h;
+  const el = document.getElementById('three-canvas');
+  camera.aspect = el.clientWidth / el.clientHeight;
   camera.updateProjectionMatrix();
-  renderer.setSize(w, h);
+  renderer.setSize(el.clientWidth, el.clientHeight);
 }
 
-function updateTrail(pos3) {
-  trailPositions.push(pos3.clone());
-  if (trailPositions.length > TRAIL_MAX) trailPositions.shift();
+/* ── Proyectar etiqueta HTML sobre posición 3D ─────────────────── */
+function projectLabel(id, worldPos) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  const v  = worldPos.clone().project(camera);
+  const cw = renderer.domElement.clientWidth;
+  const ch = renderer.domElement.clientHeight;
+  if (v.z > 1) { el.style.display = 'none'; return; }
+  el.style.display = 'block';
+  el.style.left = ((v.x * .5 + .5) * cw) + 'px';
+  el.style.top  = ((-v.y * .5 + .5) * ch - 28) + 'px';
+}
 
+/* ── Trail ── */
+function updateTrail(pos) {
+  trail.push(pos.clone());
+  if (trail.length > TRAIL_MAX) trail.shift();
   if (trailLine) { scene.remove(trailLine); trailLine.geometry.dispose(); }
-  if (trailPositions.length < 2) return;
-
-  const geo = new THREE.BufferGeometry().setFromPoints(trailPositions);
-  trailLine = new THREE.Line(
-    geo,
-    new THREE.LineBasicMaterial({ color: 0xff4800, transparent: true, opacity: 0.6 })
-  );
+  if (trail.length < 2) return;
+  const geo = new THREE.BufferGeometry().setFromPoints(trail);
+  trailLine = new THREE.Line(geo,
+    new THREE.LineBasicMaterial({ color: 0xff5010, transparent: true, opacity: 0.55 }));
   scene.add(trailLine);
 }
 
+/* ── Render loop ── */
 function animate() {
   requestAnimationFrame(animate);
-  meshEarth.rotation.y += 0.0003;
-  if (meshClouds) meshClouds.rotation.y += 0.00035;
+  meshEarth.rotation.y += 0.00028;
+  if (meshClouds) meshClouds.rotation.y += 0.00033;
   controls.update();
   renderer.render(scene, camera);
+  // Etiquetas HTML
+  projectLabel('lbl-earth', new THREE.Vector3(0, EARTH_R * 1.5, 0));
+  projectLabel('lbl-moon',  meshMoon.position.clone().add(new THREE.Vector3(0, MOON_R * 1.6, 0)));
+  projectLabel('lbl-orion', meshOrion.position.clone().add(new THREE.Vector3(0, S * 9, 0)));
 }
 
-/* ─────────────────────────────────────────────────────────────────────
-   HUD helpers
-───────────────────────────────────────────────────────────────────── */
+/* ═══════════════════════════════════════════════════════════════════
+   HUD
+═══════════════════════════════════════════════════════════════════ */
 const $ = id => document.getElementById(id);
+const fmt = (n, d=0) => isFinite(n) ? n.toLocaleString('en-US', { maximumFractionDigits: d }) : '—';
+const sv  = (id, txt, cls) => { const e=$(id); if(!e) return; e.textContent=txt; if(cls) e.className='val '+cls; };
 
-function fmt(n, dec=0) {
-  return isFinite(n) ? n.toLocaleString('en-US', { maximumFractionDigits: dec }) : '—';
-}
-
-function setVal(id, text, cls) {
-  const el = $(id);
-  if (!el) return;
-  el.textContent = text;
-  if (cls) { el.className = 'val ' + cls; }
-}
-
-/* ─────────────────────────────────────────────────────────────────────
-   WebSocket
-───────────────────────────────────────────────────────────────────── */
-let pktCount = 0, fpsTimer = 0, fpsCount = 0;
+let pktCount=0, fpsTimer=0, fpsCount=0;
 
 function updateHUD(d) {
   const s = d.ship, m = d.moon;
 
-  // MET / Reloj
   $('met').textContent   = d.met;
   $('clock').textContent = d.time;
 
-  // Badge de fuente
   const badge = $('src-badge');
-  if (d.source.includes('HORIZONS')) {
-    badge.textContent = '● JPL HORIZONS';
-    badge.className   = 'live';
-  } else if (d.source.includes('CACHE')) {
-    badge.textContent = '◌ CACHE';
-    badge.className   = 'cached';
-  } else {
-    badge.textContent = d.source;
-    badge.className   = 'init';
-  }
+  if      (d.source.includes('HORIZONS')) { badge.textContent='● JPL HORIZONS'; badge.className='live'; }
+  else if (d.source.includes('CACHE'))    { badge.textContent='◌ CACHE';         badge.className='cached'; }
+  else                                    { badge.textContent=d.source;           badge.className='init'; }
 
-  // Navegación
-  setVal('d-earth', fmt(s.dist_e) + ' km',    'orange');
-  setVal('d-moon',  fmt(s.dist_m) + ' km',    '');
-  setVal('v-speed', s.v.toFixed(3) + ' km/s', 'orange');
-  setVal('v-light', s.light_e.toFixed(4) + ' s', '');
-  setVal('v-lat',   s.lat_m.toFixed(2) + '°', 'yellow');
-  setVal('v-lon',   s.lon_m.toFixed(2) + '°', 'yellow');
-
-  // Vectores
-  setVal('v-x', fmt(s.x));
-  setVal('v-y', fmt(s.y));
-  setVal('v-z', fmt(s.z));
-  setVal('v-vx', s.vx.toFixed(3));
-  setVal('v-vy', s.vy.toFixed(3));
-  setVal('v-vz', s.vz.toFixed(3));
-
-  // Luna
-  setVal('m-x', fmt(m.x));
-  setVal('m-y', fmt(m.y));
-  setVal('m-z', fmt(m.z));
-
-  // Sistema
-  setVal('pkt-cnt', ++pktCount);
-
-  // FPS
+  sv('d-earth', fmt(s.dist_e)+' km',       'orange');
+  sv('d-moon',  fmt(s.dist_m)+' km',       '');
+  sv('v-speed', s.v.toFixed(3)+' km/s',    'orange');
+  sv('v-light', s.light_e.toFixed(4)+' s', '');
+  sv('v-lat',   s.lat_m.toFixed(2)+'°',    'yellow');
+  sv('v-lon',   s.lon_m.toFixed(2)+'°',    'yellow');
+  sv('v-x',  fmt(s.x));  sv('v-y',  fmt(s.y));  sv('v-z',  fmt(s.z));
+  sv('v-vx', s.vx.toFixed(3)); sv('v-vy', s.vy.toFixed(3)); sv('v-vz', s.vz.toFixed(3));
+  sv('m-x',  fmt(m.x));  sv('m-y',  fmt(m.y));  sv('m-z',  fmt(m.z));
+  sv('pkt-cnt', ++pktCount);
   fpsCount++;
   const now = performance.now();
-  if (now - fpsTimer > 1000) {
-    setVal('fps-val', fpsCount);
-    fpsCount = 0;
-    fpsTimer = now;
+  if (now - fpsTimer > 1000) { sv('fps-val', fpsCount); fpsCount=0; fpsTimer=now; }
+
+  /* ── Posiciones de display normalizadas ── */
+  const moonR = Math.sqrt(m.x**2 + m.y**2 + m.z**2);
+  if (!moonR || !s.dist_e || !s.dist_m) return;
+
+  // Dirección real J2000 → Three.js, distancia siempre DISPLAY_DIST
+  const moonDP = j2dir(m.x, m.y, m.z).multiplyScalar(DISPLAY_DIST);
+  meshMoon.position.copy(moonDP);
+
+  // Orion: proporción real de cuánto del trayecto recorrió
+  const prog    = Math.max(0.04, Math.min(0.96, s.dist_e / (s.dist_e + s.dist_m)));
+  const orionDP = moonDP.clone().multiplyScalar(prog);
+  meshOrion.position.copy(orionDP);
+  meshOrion.lookAt(moonDP);   // nariz apuntando a la Luna
+
+  updateTrail(orionDP);
+
+  // Actualizar línea de trayectoria Tierra→Luna
+  if (pathLine) {
+    pathLine.geometry.setFromPoints([new THREE.Vector3(0,0,0), moonDP]);
+    pathLine.geometry.attributes.position.needsUpdate = true;
   }
 
-  // Three.js
-  const orionPos = geo2three(s.x, s.y, s.z);
-  meshOrion.position.copy(orionPos);
-  meshMoon.position.copy(geo2three(m.x, m.y, m.z));
-
-  // Apuntar la nave hacia la Luna
-  meshOrion.lookAt(meshMoon.position);
-
-  updateTrail(orionPos);
-
-  // Cámara sigue la nave suavemente
-  controls.target.lerp(orionPos, 0.05);
+  // Cámara: target en el punto medio del sistema
+  controls.target.lerp(moonDP.clone().multiplyScalar(0.5), 0.012);
 }
 
 function connect() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const ws = new WebSocket(proto + '//' + location.host + '/ws/telemetry');
-
-  ws.onopen = () => {
-    $('conn-st').textContent = 'WS OK';
-    $('conn-st').className   = 'val green';
-  };
-  ws.onmessage = e => {
-    try { updateHUD(JSON.parse(e.data)); } catch (_) {}
-  };
-  ws.onclose = () => {
-    $('conn-st').textContent = 'RECONECTANDO';
-    $('conn-st').className   = 'val red';
-    setTimeout(connect, 2000);
-  };
-  ws.onerror = () => ws.close();
+  const ws    = new WebSocket(proto + '//' + location.host + '/ws/telemetry');
+  ws.onopen    = () => { sv('conn-st','WS OK','green'); };
+  ws.onmessage = e => { try { updateHUD(JSON.parse(e.data)); } catch(_) {} };
+  ws.onclose   = () => { sv('conn-st','RECONECTANDO','red'); setTimeout(connect, 2000); };
+  ws.onerror   = () => ws.close();
 }
 
-/* ─────────────────────────────────────────────────────────────────────
-   Init
-───────────────────────────────────────────────────────────────────── */
 initScene();
 animate();
 connect();
