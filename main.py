@@ -3,6 +3,7 @@ main.py — Artemis II FIDO Console
 FastAPI + WebSocket + Three.js
 Datos reales: JPL Horizons API vía worker.py
 """
+from __future__ import annotations   # ← lazy annotations: compatible Python 3.7+
 
 import os
 import asyncio
