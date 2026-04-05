@@ -4,53 +4,33 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 import asyncpg
 
-app = FastAPI(title="Artemis II FIDO System")
-
-# Variable inyectada automáticamente por Railway si enlazas Postgres
+app = FastAPI(title="NASA FIDO | Artemis Master Control")
 DATABASE_URL = os.getenv("DATABASE_URL")
-
-# Lista de conexiones WebSocket activas (celulares viendo la web)
 active_connections = set()
 
 async def broadcast_telemetry(conn, pid, channel, payload):
-    """
-    Esta función se ejecuta CADA VEZ que el worker.py grita datos en Postgres.
-    Se conecta con todos los celulares abiertos y les manda el paquete de datos raw.
-    """
     dead_connections = set()
     for websocket in active_connections:
         try:
-            # Reenviamos el JSON tal cual nos llegó de Postgres
             await websocket.send_text(payload)
         except:
-            # Si un celular se desconectó, lo anotamos para borrarlo
             dead_connections.add(websocket)
-    
-    # Limpiamos los WebSockets muertos
     active_connections.difference_update(dead_connections)
 
 @app.on_event("startup")
 async def startup_event():
-    print("INICIANDO GATEWAY DE COMUNICACIONES...")
     try:
-        # Nos conectamos a PostgreSQL Nucleus
         app.state.db_conn = await asyncpg.connect(DATABASE_URL)
-        # Nos ponemos en escucha (LISTEN) de lo que el worker grite
         await app.state.db_conn.add_listener('telemetry_stream', broadcast_telemetry)
-        print("CONECTADO A POSTGRESQL NUCLEUS OK")
-    except Exception as e:
-        print(f"Error crítico conectando a la base de datos: {e}")
+    except Exception as e: print(f"Error DB: {e}")
 
 @app.websocket("/ws/telemetry")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     active_connections.add(websocket)
     try:
-        while True:
-            # Mantenemos la conexión viva
-            await websocket.receive_text()
-    except WebSocketDisconnect:
-        active_connections.discard(websocket)
+        while True: await websocket.receive_text()
+    except WebSocketDisconnect: active_connections.discard(websocket)
 
 @app.get("/")
 async def get_frontend():
@@ -60,33 +40,41 @@ async def get_frontend():
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-        <title>NASA FIDO | Artemis Deep Space Link</title>
+        <title>NASA FIDO | Consola Maestra Artemis II</title>
         <style>
             @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap');
-            :root { --cian: #00f2ff; --orange: #ff4800; --bg: #000; }
+            :root { --cian: #00f2ff; --orange: #ff4800; --bg: #000; --green: #00ff88; --yellow: #ffcc00; --red: #ff3333; }
             * { box-sizing: border-box; }
-            body, html { margin:0; padding:0; height:100dvh; background:var(--bg); color:#fff; font-family:'Share Tech Mono',monospace; overflow:hidden; touch-action: none;}
+            body, html { margin:0; padding:0; height:100dvh; background:var(--bg); color:#fff; font-family:'Share Tech Mono',monospace; overflow:hidden; touch-action: none; font-size: 14px;}
             
             #layout { display:flex; flex-direction:column; height:100%; width: 100%;}
             
-            /* Viewport 3D (Sección Superior) */
-            #viewport { height:60%; position:relative; border-bottom:2px solid var(--cian); background:#000; }
+            /* Viewport 3D Reducido (45%) */
+            #viewport { height:45%; position:relative; border-bottom:1px solid rgba(0,242,255,0.5); background:#000; }
             
-            /* HUD Táctico (Sección Inferior) */
-            #hud { height:40%; padding:15px; background:rgba(0,10,15,1); display:flex; flex-direction:column; gap:10px; overflow-y: auto;}
+            /* HUD Táctico Masivo (55%) */
+            #hud { height:55%; padding:10px; background:rgba(0,10,15,1); display:grid; grid-template-columns: 1fr 1fr; grid-template-rows: auto auto auto; gap:8px; overflow-y: auto;}
             
-            .header-info { position:absolute; top:10px; left:10px; z-index:10; pointer-events:none; }
-            .tag { display:inline-block; padding:2px 8px; font-size:0.7rem; font-weight:bold; background:var(--cian); color:#000; border-radius: 2px; margin-bottom:2px;}
-            #clock { font-size:1.8rem; color:var(--cian); text-shadow:0 0 10px var(--cian); }
+            .header-info { position:absolute; top:8px; left:8px; z-index:10; pointer-events:none; }
+            .tag { display:inline-block; padding:1px 6px; font-size:0.65rem; font-weight:bold; background:var(--cian); color:#000; border-radius: 2px;}
+            #clock { font-size:1.4rem; color:var(--cian); text-shadow:0 0 10px var(--cian); }
+            #met-clock { font-size:1.1rem; color:var(--yellow); font-weight:bold;}
 
-            .card { border:1px solid rgba(0,242,255,0.3); background:rgba(0,242,255,0.05); padding:10px; border-radius: 4px; box-shadow: inset 0 0 10px rgba(0,0,0,0.5);}
-            .card h2 { margin:0 0 8px 0; font-size:0.8rem; color:var(--cian); letter-spacing:1px;}
+            .card { border:1px solid rgba(0,242,255,0.2); background:rgba(0,242,255,0.03); padding:6px; border-radius: 4px; box-shadow: inset 0 0 10px rgba(0,0,0,0.5);}
+            .card h2 { margin:0 0 5px 0; font-size:0.7rem; color:var(--cian); letter-spacing:1px; border-bottom: 1px solid rgba(0,242,255,0.15); padding-bottom: 2px;}
             
-            .data-row { display:flex; justify-content:space-between; align-items:flex-end; margin-bottom:4px; font-size:0.9rem;}
-            .lbl { color:#888; font-size:0.8rem;}
-            .val { font-weight:bold; font-size:1.1rem; font-variant-numeric:tabular-nums; }
-            .val.orange { color:var(--orange); text-shadow:0 0 5px rgba(255,72,0,0.5); }
-            .val.green { color:#0f0; }
+            .data-row { display:flex; justify-content:space-between; align-items:flex-end; margin-bottom:1px; font-size:0.75rem;}
+            .lbl { color:#999; }
+            .val { font-weight:bold; font-size:0.9rem; font-variant-numeric:tabular-nums; color:#fff;}
+            .val.orange { color:var(--orange); text-shadow:0 0 3px rgba(255,72,0,0.3); }
+            .val.green { color:var(--green); }
+            .val.yellow { color:var(--yellow); }
+            .val.small { font-size: 0.8rem; }
+            .val.red { color:var(--red); font-weight: bold;}
+
+            /* Estilos de panel específicos */
+            .p-estado { grid-column: 1 / 3; border-color: var(--orange); background:rgba(255,72,0,0.03); }
+            .p-env { grid-column: 1 / 3; border-color: var(--green); }
 
             #three-canvas { width:100%; height:100%; display:block; }
         </style>
@@ -97,23 +85,46 @@ async def get_frontend():
         <div id="layout">
             <div id="viewport">
                 <div class="header-info">
-                    <div class="tag">● TELEMETRY LINK ACTIVE</div>
+                    <div class="tag">● FLIGHT DYNAMICS LINK (FIDO)</div>
                     <div id="clock">00:00:00.000</div>
+                    <div id="met-clock">MET T+ 00:00:00:00</div>
                 </div>
                 <div id="three-canvas"></div>
             </div>
 
             <div id="hud">
-                <div class="card" style="border-color: var(--orange);">
-                    <h2 style="color: var(--orange);">CÁPSULA ORION (ESTADO VECTORIAL)</h2>
-                    <div class="data-row"><span class="lbl">VELOCIDAD INERCIAL</span> <span class="val orange" id="v-vel">0.00000 km/s</span></div>
-                    <div class="data-row"><span class="lbl">ALTITUD TIERRA</span> <span class="val" id="v-dist-e">0 km</span></div>
-                    <div class="data-row"><span class="lbl">PROXIMIDAD LUNAR</span> <span class="val" id="v-dist-m">0 km</span></div>
+                <div class="card p-estado">
+                    <h2 style="color: var(--orange);">ARTEMIS II | ESTADO GENERAL DE LA MISIÓN</h2>
+                    <div class="data-row"><span class="lbl">FASE DE VUELO</span> <span class="val orange" id="v-phase">CONNECTING...</span></div>
+                    <div class="data-row"><span class="lbl">VELOCIDAD INERCIAL J2000</span> <span class="val orange" id="v-vel">0.00000 km/s</span></div>
+                    <div class="data-row"><span class="lbl">ALTITUD TIERRA (Geocéntrica)</span> <span class="val" id="v-dist-e">0 km</span></div>
+                    <div class="data-row"><span class="lbl">DISTANCIA LUNA (Selocéntrica)</span> <span class="val yellow" id="v-dist-m">0 km</span></div>
                 </div>
 
                 <div class="card">
-                    <h2>MÉTRICAS DE RED / SISTEMA</h2>
-                    <div class="data-row"><span class="lbl">FUENTE DE DATOS</span> <span class="val green" id="v-source">CONNECTING...</span></div>
+                    <h2>VECTORES ESTADO J2000 ( km / km/s )</h2>
+                    <div class="data-row"><span class="lbl">EJE X</span> <span class="val small" id="v-x">0</span></div>
+                    <div class="data-row"><span class="lbl">EJE Y</span> <span class="val small" id="v-y">0</span></div>
+                    <div class="data-row"><span class="lbl">EJE Z</span> <span class="val small" id="v-z">0</span></div>
+                    <div class="data-row" style="margin-top:2px;"><span class="lbl">VEL. Vx</span> <span class="val small green" id="v-vx">0</span></div>
+                    <div class="data-row"><span class="lbl">VEL. Vy</span> <span class="val small green" id="v-vy">0</span></div>
+                    <div class="data-row"><span class="lbl">VEL. Vz</span> <span class="val small green" id="v-vz">0</span></div>
+                </div>
+
+                <div class="card" style="border-color: var(--yellow);">
+                    <h2 style="color: var(--yellow);">MÉTRICAS RELATIVAS A LA LUNA</h2>
+                    <div class="data-row"><span class="lbl">VEL. RELATIVA LUNA</span> <span class="val yellow" id="v-vrel-m">0.00000 km/s</span></div>
+                    <div class="data-row" style="margin-top:3px;"><span class="lbl">LAT SELENOGRÁFICA</span> <span class="val" id="v-lat-m">0.00°</span></div>
+                    <div class="data-row"><span class="lbl">LON SELENOGRÁFICA</span> <span class="val" id="v-lon-m">0.00°</span></div>
+                    <div class="data-row" style="margin-top:3px;"><span class="lbl">ÁNGULO DE FASE LUNAR</span> <span class="val red" id="v-phase-angle">0.00°</span></div>
+                </div>
+
+                <div class="card p-env">
+                    <h2 style="color: var(--green);">DINÁMICA ESPACIAL AVANZADA Y SISTEMA</h2>
+                    <div class="data-row"><span class="lbl">VELOCIDAD RELATIVA (MACH)</span> <span class="val" id="v-mach">0.00 M</span></div>
+                    <div class="data-row"><span class="lbl">LATENCIA LUZ IDA (Tierra)</span> <span class="val" id="v-light">0.0000 s</span></div>
+                    <div class="data-row"><span class="lbl">COORD. ECUATORIALES (RA/Dec)</span> <span class="val small" id="v-coords">0 / 0</span></div>
+                    <div class="data-row" style="border:none; margin-top:2px;"><span class="lbl">UPLINK STATUS</span> <span class="val green" id="v-source" style="font-size:0.75rem;">CONNECTING...</span></div>
                 </div>
             </div>
         </div>
@@ -123,7 +134,6 @@ async def get_frontend():
             let scene, camera, renderer, controls;
             let earth, moon, orion;
 
-            // Función para crear carteles de texto 3D que miran a la cámara
             function createLabel(text, color) {
                 const canvas = document.createElement('canvas');
                 const ctx = canvas.getContext('2d');
@@ -132,7 +142,7 @@ async def get_frontend():
                 ctx.font = 'Bold 40px Share Tech Mono';
                 ctx.textAlign = 'center';
                 ctx.fillText(text, 128, 45);
-                const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(canvas), transparent: true }));
+                const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(canvas), transparent: true, depthTest: false }));
                 sprite.scale.set(60, 15, 1);
                 return sprite;
             }
@@ -141,7 +151,7 @@ async def get_frontend():
                 const container = document.getElementById('three-canvas');
                 scene = new THREE.Scene();
                 camera = new THREE.PerspectiveCamera(50, container.clientWidth / container.clientHeight, 1, 5000000);
-                camera.position.set(0, 300, 700);
+                camera.position.set(0, 300, 600);
 
                 renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
                 renderer.setSize(container.clientWidth, container.clientHeight);
@@ -151,110 +161,49 @@ async def get_frontend():
                 controls = new THREE.OrbitControls(camera, renderer.domElement);
                 controls.enableDamping = true;
 
-                // --- ILUMINACIÓN REALISTA ESPACIAL ---
-                scene.add(new THREE.AmbientLight(0x222222)); // Luz ambiente baja para el espacio profundo
-                const sun = new THREE.DirectionalLight(0xffffff, 1.2); // El Sol, luz blanca potente
+                scene.add(new THREE.AmbientLight(0x333333));
+                const sun = new THREE.DirectionalLight(0xffffff, 1.2);
                 sun.position.set(-10, 2, 10);
                 scene.add(sun);
 
                 const tl = new THREE.TextureLoader();
 
-                // --- TIERRA FOTOREALISTA ---
                 earth = new THREE.Group();
                 const eMesh = new THREE.Mesh(
-                    new THREE.SphereGeometry(35, 64, 64),
-                    new THREE.MeshPhongMaterial({ 
-                        map: tl.load('https://unpkg.com/three-globe/example/img/earth-blue-marble.jpg'),
-                        specular: 0x333333,
-                        shininess: 10
-                    })
+                    new THREE.SphereGeometry(35, 32, 32),
+                    new THREE.MeshPhongMaterial({ map: tl.load('https://unpkg.com/three-globe/example/img/earth-blue-marble.jpg')})
                 );
                 earth.add(eMesh);
-                const eLbl = createLabel("TIERRA", "#00f2ff");
-                eLbl.position.y = 50;
-                earth.add(eLbl);
+                const eLbl = createLabel("EARTH", "#00f2ff"); eLbl.position.y = 50; earth.add(eLbl);
                 scene.add(earth);
 
-                // --- LUNA FOTOREALISTA ---
                 moon = new THREE.Group();
                 const mMesh = new THREE.Mesh(
                     new THREE.SphereGeometry(15, 32, 32),
                     new THREE.MeshStandardMaterial({ map: tl.load('https://raw.githubusercontent.com/mrdoob/three.js/master/examples/textures/planets/moon_1024.jpg') })
                 );
                 moon.add(mMesh);
-                const mLbl = createLabel("OBJETIVO LUNA", "#ffffff");
-                mLbl.position.y = 25;
-                moon.add(mLbl);
+                const mLbl = createLabel("LUNA", "#ffffff"); mLbl.position.y = 25; moon.add(mLbl);
                 scene.add(moon);
 
-                // --- MÓDULO ORION TÁCTICO DETALLADO ---
                 orion = new THREE.Group();
                 const sm = new THREE.Mesh(new THREE.CylinderGeometry(3, 3, 8, 16), new THREE.MeshStandardMaterial({color: 0xcccccc}));
-                const cm = new THREE.Mesh(new THREE.ConeGeometry(3, 4, 16), new THREE.MeshStandardMaterial({color: 0x222222}));
-                cm.position.y = 6;
-                const panelMat = new THREE.MeshBasicMaterial({color: 0x0044aa, side: THREE.DoubleSide});
-                const p1 = new THREE.Mesh(new THREE.PlaneGeometry(22, 3), panelMat);
-                const p2 = new THREE.Mesh(new THREE.PlaneGeometry(3, 22), panelMat);
-                p1.rotation.x = Math.PI/2; p2.rotation.x = Math.PI/2;
+                const cm = new THREE.Mesh(new THREE.ConeGeometry(3, 4, 16), new THREE.MeshStandardMaterial({color: 0x222222})); cm.position.y = 6;
+                const pMat = new THREE.MeshBasicMaterial({color: 0x0044aa, side: 2});
+                const p1 = new THREE.Mesh(new THREE.PlaneGeometry(22, 3), pMat); p1.rotation.x = Math.PI/2;
+                const p2 = new THREE.Mesh(new THREE.PlaneGeometry(3, 22), pMat); p2.rotation.x = Math.PI/2;
                 orion.add(sm, cm, p1, p2);
-                
-                const oLbl = createLabel("ORION", "#ff4800");
-                oLbl.position.y = 15;
-                orion.add(oLbl);
+                const oLbl = createLabel("ORION", "#ff4800"); oLbl.position.y = 15; orion.add(oTag);
                 scene.add(orion);
 
-                // Fondo de estrellas
                 const starsGeo = new THREE.BufferGeometry();
                 const starsCoords = [];
-                for(let i=0; i<1500; i++){ starsCoords.push((Math.random()-0.5)*4000, (Math.random()-0.5)*4000, (Math.random()-0.5)*4000); }
+                for(let i=0; i<1500; i++){ starsCoords.push((Math.random()-0.5)*5000, (Math.random()-0.5)*5000, (Math.random()-0.5)*5000); }
                 starsGeo.setAttribute('position', new THREE.Float32BufferAttribute(starsCoords, 3));
                 scene.add(new THREE.Points(starsGeo, new THREE.PointsMaterial({color: 0xffffff, size: 1.5})));
-                
-                // Grilla de orientación espacial
                 scene.add(new THREE.GridHelper(3000, 50, 0x002222, 0x001111));
             }
 
             function animate() {
                 requestAnimationFrame(animate);
-                // --- ROTACIÓN DE LA TIERRA MÁGICA ---
-                earth.children[0].rotation.y += 0.001; // Gira lentamente
-                orion.rotation.z += 0.01;
-                controls.update();
-                renderer.render(scene, camera);
-            }
-
-            // Conexión WebSocket para datos en vivo
-            function connect() {
-                const ws = new WebSocket((window.location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + window.location.host + '/ws/telemetry');
-                ws.onmessage = (e) => {
-                    const d = JSON.parse(e.data);
-                    document.getElementById('clock').innerText = d.time;
-                    document.getElementById('v-source').innerText = d.source;
-                    document.getElementById('v-vel').innerText = d.ship.v.toFixed(5) + " km/s";
-                    document.getElementById('v-dist-e').innerText = Math.round(d.ship.dist_e).toLocaleString() + " km";
-                    document.getElementById('v-dist-m').innerText = Math.round(d.ship.dist_m).toLocaleString() + " km";
-
-                    // Actualizar posiciones 3D (dividiendo por SCALE)
-                    const ox = d.ship.x/SCALE, oz = d.ship.z/SCALE, oy = -d.ship.y/SCALE;
-                    const mx = d.moon.x/SCALE, mz = d.moon.z/SCALE, my = -d.moon.y/SCALE;
-                    
-                    orion.position.set(ox, oz, oy); 
-                    moon.position.set(mx, mz, my);
-                    
-                    // La cámara sigue el punto medio táctico
-                    controls.target.set(ox/2, oz/2, oy/2);
-                };
-                ws.onclose = () => setTimeout(connect, 1000); // Reintentar si se corta
-            }
-
-            init3D(); animate(); connect();
-            window.addEventListener('resize', () => {
-                const c = document.getElementById('three-canvas');
-                camera.aspect = c.clientWidth/c.clientHeight; camera.updateProjectionMatrix();
-                renderer.setSize(c.clientWidth, c.clientHeight);
-            });
-        </script>
-    </body>
-    </html>
-    """
-    return HTMLResponse(content=html_content)
+                earth.children
