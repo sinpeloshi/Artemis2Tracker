@@ -1,217 +1,310 @@
-import os
+"""
+worker.py — Artemis II Telemetry Worker
+Fuente de datos: JPL Horizons API (ssd.jpl.nasa.gov)
+  · Orion / Integrity  → COMMAND='-1024'
+  · Luna               → COMMAND='301'
+
+Estrategia:
+  - refresh_loop()  : cada 60 s consulta Horizons → guarda state vectors reales
+  - telemetry_loop(): cada 0.5 s extrapola posición con velocidad actual → pg_notify
+"""
+
 import asyncio
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+import json
+import math
+import os
+import httpx
+from datetime import datetime, timedelta, timezone
 import asyncpg
 
-app = FastAPI()
-DATABASE_URL = os.getenv("DATABASE_ARTEMIS")
-active_connections = set()
+# ── Constantes de misión ─────────────────────────────────────────────────────
+# Despegue real: 1 de abril de 2026, 6:35 PM EDT = 22:35:00 UTC
+LAUNCH_DATE = datetime(2026, 4, 1, 22, 35, 0, tzinfo=timezone.utc)
 
-async def broadcast_telemetry(conn, pid, channel, payload):
-    for ws in list(active_connections):
-        try: await ws.send_text(payload)
-        except: active_connections.discard(ws)
+DATABASE_URL      = os.getenv("DATABASE_ARTEMIS")
+HORIZONS_URL      = "https://ssd.jpl.nasa.gov/api/horizons.api"
+HORIZONS_INTERVAL = 60    # segundos entre refreshes de la API
+TELEMETRY_FPS     = 2     # paquetes por segundo (sleep = 0.5 s)
 
-@app.on_event("startup")
-async def startup():
-    app.state.db_conn = await asyncpg.connect(DATABASE_URL)
-    await app.state.db_conn.add_listener('telemetry_stream', broadcast_telemetry)
+# ── Cache compartido entre loops ─────────────────────────────────────────────
+_cache: dict = {
+    "ship": dict(x=0.0, y=0.0, z=0.0, vx=0.0, vy=0.0, vz=0.0, t=None),
+    "moon": dict(x=0.0, y=0.0, z=0.0, t=None),
+    "source": "INIT",
+}
 
-@app.websocket("/ws/telemetry")
-async def websocket_endpoint(websocket: WebSocket):
-    await websocket.accept()
-    active_connections.add(websocket)
-    try:
-        while True: await websocket.receive_text()
-    except WebSocketDisconnect: active_connections.discard(websocket)
 
-@app.get("/")
-async def get():
-    return HTMLResponse(content="""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-        <title>NASA FIDO | Artemis II Master Console</title>
-        <style>
-            @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap');
-            body { margin:0; background:#000; color:#fff; font-family:'Share Tech Mono',monospace; overflow:hidden; font-size:12px; }
-            #viewport { height:45%; position:relative; border-bottom:1px solid #00f2ff; background: radial-gradient(circle at center, #000810 0%, #000 100%); }
-            #hud { height:55%; padding:10px; display:grid; grid-template-columns: 1fr 1fr; gap:8px; background:#010a0c; overflow-y:auto; }
-            .card { border:1px solid rgba(0,242,255,0.25); padding:10px; background:rgba(0,242,255,0.03); border-radius: 4px; box-shadow: inset 0 0 15px rgba(0,0,0,0.5); }
-            .val { font-weight:bold; color:#00f2ff; float:right; font-variant-numeric: tabular-nums; font-size: 1.1rem;}
-            .orange { color:#ff4800; }
-            .header { font-size:1.1rem; color:#00f2ff; margin-bottom:8px; letter-spacing: 1px; border-bottom: 1px solid rgba(0,242,255,0.1); padding-bottom: 4px;}
-            #three-canvas { width:100%; height:100%; }
-            .label-3d { font-size: 0.7rem; color: #00f2ff; background: rgba(0,0,0,0.7); padding: 2px 4px; border: 1px solid #00f2ff; }
-        </style>
-        <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-        <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
-    </head>
-    <body>
-        <div id="viewport">
-            <div style="position:absolute; top:12px; left:12px; z-index:10; pointer-events: none;">
-                <div id="met" style="font-size:1.6rem; color:#ffcc00; text-shadow: 0 0 10px rgba(255,204,0,0.5)">T+ 00:00:00:00</div>
-                <div id="clock" style="color: #00f2ff; opacity: 0.8;">00:00:00 UTC</div>
-            </div>
-            <div id="three-canvas"></div>
-        </div>
-        <div id="hud">
-            <div class="card" style="grid-column: 1/3; border-color:#ff4800">
-                <div class="header orange">ARTEMIS II | MISSION DYNAMICS</div>
-                <div style="margin-bottom:6px;">DISTANCIA TIERRA <span class="val" id="d-earth">0 km</span></div>
-                <div style="margin-bottom:6px;">DISTANCIA LUNA <span class="val" id="d-moon">0 km</span></div>
-                <div>VELOCIDAD INERCIAL <span class="val orange" id="v-inertial">0.000 km/s</span></div>
-            </div>
-            <div class="card">
-                <div class="header" style="font-size:0.8rem; color:#888;">INERTIAL VECTORS (J2000)</div>
-                <div>X-AXIS <span class="val" id="v-x">0</span></div>
-                <div style="margin: 4px 0;">Y-AXIS <span class="val" id="v-y">0</span></div>
-                <div>Z-AXIS <span class="val" id="v-z">0</span></div>
-            </div>
-            <div class="card">
-                <div class="header" style="font-size:0.8rem; color:#888;">NETWORK STATUS</div>
-                <div>LIGHT TIME <span class="val" id="v-light">0.000s</span></div>
-                <div style="margin-top: 15px;">UPLINK <span class="val" style="color:#0f0" id="v-src">SINCRO</span></div>
-            </div>
-        </div>
-        <script>
-            const SCALE = 1000;
-            let scene, camera, renderer, controls, earth, moon, orion;
+# ── Utilidades ───────────────────────────────────────────────────────────────
 
-            function init3D() {
-                scene = new THREE.Scene();
-                const container = document.getElementById('three-canvas');
-                camera = new THREE.PerspectiveCamera(50, container.clientWidth/container.clientHeight, 1, 2000000);
-                camera.position.set(0, 300, 800);
-                
-                renderer = new THREE.WebGLRenderer({antialias:true, alpha: true});
-                renderer.setSize(container.clientWidth, container.clientHeight);
-                renderer.setPixelRatio(window.devicePixelRatio);
-                container.appendChild(renderer.domElement);
-                
-                controls = new THREE.OrbitControls(camera, renderer.domElement);
-                controls.enableDamping = true;
+def to_jd(dt: datetime) -> float:
+    """Convierte datetime UTC → Fecha Juliana (JD)."""
+    epoch = datetime(2000, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    return 2451545.0 + (dt - epoch).total_seconds() / 86400.0
 
-                // --- ILUMINACIÓN PROFESIONAL ---
-                scene.add(new THREE.AmbientLight(0x222222));
-                const sun = new THREE.DirectionalLight(0xffffff, 1.5);
-                sun.position.set(10, 5, 10);
-                scene.add(sun);
 
-                const loader = new THREE.TextureLoader();
+def parse_vectors(text: str) -> list[dict]:
+    """
+    Parsea la tabla de vectores en formato CSV de JPL Horizons.
+    Columnas entre $$SOE y $$EOE:
+      JDTDB, Calendar Date (TDB), X, Y, Z, VX, VY, VZ  [+LT, RG, RR si VEC_TABLE=3]
+    """
+    rows, active = [], False
+    for line in text.splitlines():
+        if "$$SOE" in line:
+            active = True
+            continue
+        if "$$EOE" in line:
+            break
+        if not active:
+            continue
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) < 8:
+            continue
+        try:
+            rows.append({
+                "jd": float(parts[0]),
+                "x":  float(parts[2]),
+                "y":  float(parts[3]),
+                "z":  float(parts[4]),
+                "vx": float(parts[5]),
+                "vy": float(parts[6]),
+                "vz": float(parts[7]),
+            })
+        except (ValueError, IndexError):
+            pass
+    return rows
 
-                // --- TIERRA MEJORADA ---
-                const earthGeo = new THREE.SphereGeometry(35, 64, 64);
-                const earthMat = new THREE.MeshPhongMaterial({
-                    map: loader.load('https://unpkg.com/three-globe/example/img/earth-blue-marble.jpg'),
-                    specular: new THREE.Color(0x333333),
-                    shininess: 5
-                });
-                earth = new THREE.Mesh(earthGeo, earthMat);
-                scene.add(earth);
 
-                // --- LUNA MEJORADA ---
-                const moonGeo = new THREE.SphereGeometry(15, 64, 64);
-                const moonMat = new THREE.MeshStandardMaterial({
-                    map: loader.load('https://raw.githubusercontent.com/mrdoob/three.js/master/examples/textures/planets/moon_1024.jpg'),
-                    roughness: 1,
-                    metalness: 0
-                });
-                moon = new THREE.Mesh(moonGeo, moonMat);
-                scene.add(moon);
+def interp_state(rows: list[dict], jd: float) -> dict | None:
+    """
+    Interpolación lineal entre dos state vectors.
+    Si el JD está fuera del rango, extrapola desde el punto más cercano
+    usando la velocidad (integración de primer orden).
+    """
+    if not rows:
+        return None
+    if len(rows) == 1:
+        # Solo hay un punto: extrapolar
+        near = rows[0]
+        dt = (jd - near["jd"]) * 86400.0
+        return {
+            "x": near["x"] + near["vx"] * dt,
+            "y": near["y"] + near["vy"] * dt,
+            "z": near["z"] + near["vz"] * dt,
+            "vx": near["vx"], "vy": near["vy"], "vz": near["vz"],
+        }
 
-                // --- CÁPSULA ORION REALISTA ---
-                orion = new THREE.Group();
-                
-                // Módulo de Servicio (Cilindro)
-                const serviceBody = new THREE.Mesh(
-                    new THREE.CylinderGeometry(2.5, 2.5, 6, 16),
-                    new THREE.MeshStandardMaterial({color: 0xcccccc, metalness: 0.5, roughness: 0.3})
-                );
-                
-                // Cápsula de Tripulación (Cono truncado)
-                const capsule = new THREE.Mesh(
-                    new THREE.CylinderGeometry(1, 2.5, 3, 16),
-                    new THREE.MeshStandardMaterial({color: 0x333333, metalness: 0.8})
-                );
-                capsule.position.y = 4.5;
-                
-                // Paneles Solares (4 en forma de X)
-                const panelGeo = new THREE.PlaneGeometry(12, 2.5);
-                const panelMat = new THREE.MeshStandardMaterial({color: 0x0044aa, side: THREE.DoubleSide, emissive: 0x001133});
-                
-                for(let i=0; i<4; i++) {
-                    const panel = new THREE.Mesh(panelGeo, panelMat);
-                    panel.position.y = 0;
-                    panel.rotation.y = (Math.PI / 2) * i + (Math.PI / 4);
-                    panel.position.x = Math.cos(panel.rotation.y) * 8;
-                    panel.position.z = -Math.sin(panel.rotation.y) * 8;
-                    panel.rotation.x = Math.PI / 2;
-                    orion.add(panel);
-                }
-                
-                orion.add(serviceBody, capsule);
-                scene.add(orion);
+    # Buscar el par de puntos que rodea el JD objetivo
+    for i in range(len(rows) - 1):
+        a, b = rows[i], rows[i + 1]
+        if a["jd"] <= jd <= b["jd"]:
+            t = (jd - a["jd"]) / (b["jd"] - a["jd"])
+            return {k: a[k] + t * (b[k] - a[k]) for k in ("x", "y", "z", "vx", "vy", "vz")}
 
-                // Fondo de Estrellas y Grilla
-                const starGeo = new THREE.BufferGeometry();
-                const starCoords = [];
-                for(let i=0; i<2000; i++) {
-                    starCoords.push((Math.random()-0.5)*10000, (Math.random()-0.5)*10000, (Math.random()-0.5)*10000);
-                }
-                starGeo.setAttribute('position', new THREE.Float32BufferAttribute(starCoords, 3));
-                const stars = new THREE.Points(starGeo, new THREE.PointsMaterial({color: 0xffffff, size: 1.5}));
-                scene.add(stars);
-                
-                scene.add(new THREE.GridHelper(3000, 40, 0x002222, 0x001111));
-            }
+    # JD fuera del rango: extrapolar desde el punto más cercano
+    near = min(rows, key=lambda r: abs(r["jd"] - jd))
+    dt = (jd - near["jd"]) * 86400.0
+    return {
+        "x":  near["x"]  + near["vx"] * dt,
+        "y":  near["y"]  + near["vy"] * dt,
+        "z":  near["z"]  + near["vz"] * dt,
+        "vx": near["vx"], "vy": near["vy"], "vz": near["vz"],
+    }
 
-            function connect() {
-                const ws = new WebSocket((location.protocol==='https:'?'wss:':'ws:') + '//' + location.host + '/ws/telemetry');
-                ws.onmessage = (e) => {
-                    const d = JSON.parse(e.data);
-                    document.getElementById('met').innerText = d.met;
-                    document.getElementById('clock').innerText = d.time;
-                    document.getElementById('d-earth').innerText = Math.round(d.ship.dist_e).toLocaleString() + " km";
-                    document.getElementById('d-moon').innerText = Math.round(d.ship.dist_m).toLocaleString() + " km";
-                    document.getElementById('v-inertial').innerText = d.ship.v.toFixed(3) + " km/s";
-                    document.getElementById('v-x').innerText = Math.round(d.ship.x).toLocaleString();
-                    document.getElementById('v-y').innerText = Math.round(d.ship.y).toLocaleString();
-                    document.getElementById('v-z').innerText = Math.round(d.ship.z).toLocaleString();
-                    document.getElementById('v-light').innerText = d.ship.light_e.toFixed(4) + " s";
-                    
-                    const ox = d.ship.x/SCALE, oz = d.ship.z/SCALE, oy = -d.ship.y/SCALE;
-                    orion.position.set(ox, oz, oy);
-                    moon.position.set(d.moon.x/SCALE, d.moon.z/SCALE, -d.moon.y/SCALE);
-                    
-                    // Apuntar la cápsula hacia la dirección de movimiento (Luna)
-                    orion.lookAt(moon.position);
-                    orion.rotateX(Math.PI/2);
-                    
-                    controls.target.lerp(orion.position, 0.1);
-                };
-                ws.onclose = () => setTimeout(connect, 2000);
-            }
 
-            init3D(); connect();
-            function animate() { 
-                requestAnimationFrame(animate); 
-                if(earth) earth.rotation.y += 0.0005; 
-                controls.update(); 
-                renderer.render(scene, camera); 
-            }
-            animate();
-            
-            window.addEventListener('resize', () => {
-                const c = document.getElementById('three-canvas');
-                camera.aspect = c.clientWidth/c.clientHeight;
-                camera.updateProjectionMatrix();
-                renderer.setSize(c.clientWidth, c.clientHeight);
-            });
-        </script>
-    </body>
-    </html>
+# ── Consulta a JPL Horizons ──────────────────────────────────────────────────
+
+async def fetch_vectors(client: httpx.AsyncClient, command: str, now: datetime) -> list[dict]:
+    """
+    Consulta JPL Horizons para obtener state vectors de un cuerpo dado.
+    Ventana: [now-3min, now+5min] con paso de 2 minutos → 4-5 puntos para interpolar.
+    """
+    t0 = (now - timedelta(minutes=3)).strftime("%Y-%b-%d %H:%M")
+    t1 = (now + timedelta(minutes=5)).strftime("%Y-%b-%d %H:%M")
+
+    params = {
+        "format":     "text",
+        "COMMAND":    f"'{command}'",
+        "OBJ_DATA":   "'NO'",
+        "MAKE_EPHEM": "'YES'",
+        "EPHEM_TYPE": "'VECTORS'",
+        "CENTER":     "'500@399'",   # geocéntrico, J2000
+        "START_TIME": f"'{t0}'",
+        "STOP_TIME":  f"'{t1}'",
+        "STEP_SIZE":  "'2m'",
+        "OUT_UNITS":  "'KM-S'",
+        "REF_SYSTEM": "'J2000'",
+        "VEC_TABLE":  "'2'",         # posición + velocidad
+        "CSV_FORMAT": "'YES'",
+    }
+
+    resp = await client.get(HORIZONS_URL, params=params, timeout=20.0)
+    resp.raise_for_status()
+
+    rows = parse_vectors(resp.text)
+    if not rows:
+        # Loguear fragmento de respuesta para debug si no hay datos
+        snippet = resp.text[:400].replace("\n", " ")
+        raise ValueError(f"Sin datos en respuesta Horizons ({command}): {snippet}")
+
+    return rows
+
+
+# ── Loop de refresco de Horizons (background) ────────────────────────────────
+
+async def refresh_loop(client: httpx.AsyncClient) -> None:
+    """
+    Cada HORIZONS_INTERVAL segundos consulta la API de JPL para Orion y la Luna
+    en paralelo y actualiza el cache global.
+    """
+    while True:
+        try:
+            now = datetime.now(timezone.utc)
+
+            ship_rows, moon_rows = await asyncio.gather(
+                fetch_vectors(client, "-1024", now),   # Orion Integrity (Artemis II)
+                fetch_vectors(client, "301",   now),   # Luna
+            )
+
+            jd = to_jd(now)
+            ship_state = interp_state(ship_rows, jd)
+            moon_state = interp_state(moon_rows, jd)
+
+            if ship_state:
+                _cache["ship"].update(ship_state)
+                _cache["ship"]["t"] = now
+
+            if moon_state:
+                _cache["moon"].update({k: moon_state[k] for k in ("x", "y", "z")})
+                _cache["moon"]["t"] = now
+
+            _cache["source"] = "JPL HORIZONS"
+
+            dist_e = math.sqrt(ship_state["x"]**2 + ship_state["y"]**2 + ship_state["z"]**2)
+            speed  = math.sqrt(ship_state["vx"]**2 + ship_state["vy"]**2 + ship_state["vz"]**2)
+            print(f"[{now:%H:%M:%S} UTC] Horizons OK | dist_tierra={dist_e:,.0f} km | v={speed:.3f} km/s")
+
+        except Exception as exc:
+            _cache["source"] = f"CACHE ({exc.__class__.__name__})"
+            print(f"[{datetime.now(timezone.utc):%H:%M:%S}] Error Horizons: {exc}")
+
+        await asyncio.sleep(HORIZONS_INTERVAL)
+
+
+# ── Loop de telemetría (broadcast) ───────────────────────────────────────────
+
+async def telemetry_loop(conn: asyncpg.Connection) -> None:
+    """
+    Cada 0.5 s extrapola la posición actual usando la última velocidad conocida
+    y emite el paquete de telemetría vía pg_notify → WebSocket.
+    """
+    while True:
+        now = datetime.now(timezone.utc)
+
+        # Extrapolación de posición desde el último fix de Horizons
+        s  = _cache["ship"]
+        dt = (now - s["t"]).total_seconds() if s["t"] else 0.0
+        ox = s["x"] + s["vx"] * dt
+        oy = s["y"] + s["vy"] * dt
+        oz = s["z"] + s["vz"] * dt
+        vx, vy, vz = s["vx"], s["vy"], s["vz"]
+        speed = math.sqrt(vx**2 + vy**2 + vz**2)
+
+        # Posición de la Luna (geocéntrica)
+        mx, my, mz = _cache["moon"]["x"], _cache["moon"]["y"], _cache["moon"]["z"]
+
+        # Distancias
+        dist_e = math.sqrt(ox**2 + oy**2 + oz**2)
+        dist_m = math.sqrt((mx - ox)**2 + (my - oy)**2 + (mz - oz)**2) if mx else 0.0
+
+        # Coordenadas selenocéntricas
+        lx, ly, lz = ox - mx, oy - my, oz - mz
+
+        # MET (Mission Elapsed Time) — nunca negativo
+        met_s = max(0.0, (now - LAUNCH_DATE).total_seconds())
+
+        packet = {
+            "time":   now.strftime("%H:%M:%S.%f")[:-3] + " UTC",
+            "source": _cache["source"],
+            "met": (
+                f"T+ {int(met_s // 86400):02d}:"
+                f"{int(met_s % 86400 // 3600):02d}:"
+                f"{int(met_s % 3600 // 60):02d}:"
+                f"{int(met_s % 60):02d}"
+            ),
+            "moon": {"x": mx, "y": my, "z": mz},
+            "ship": {
+                # Posición J2000 geocéntrica (km)
+                "x": ox, "y": oy, "z": oz,
+                # Velocidad (km/s)
+                "vx": vx, "vy": vy, "vz": vz,
+                "v": speed,
+                # Distancias
+                "dist_e": dist_e,
+                "dist_m": dist_m,
+                # Latencia de luz hacia Tierra
+                "light_e": dist_e / 299792.458,
+                # Coordenadas selenocéntricas
+                "lat_m": math.degrees(math.asin(max(-1.0, min(1.0, lz / dist_m)))) if dist_m > 1 else 0.0,
+                "lon_m": math.degrees(math.atan2(ly, lx)) % 360 if dist_m > 1 else 0.0,
+            },
+        }
+
+        await conn.execute("SELECT pg_notify('telemetry_stream', $1)", json.dumps(packet))
+        await asyncio.sleep(1.0 / TELEMETRY_FPS)
+
+
+# ── Punto de entrada ─────────────────────────────────────────────────────────
+
+async def main() -> None:
+    if not DATABASE_URL:
+        print("❌  Variable de entorno DATABASE_ARTEMIS no definida — saliendo.")
+        return
+
+    conn = await asyncpg.connect(DATABASE_URL)
+
+    # Tabla de persistencia (para recuperar último estado si el worker reinicia)
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS mission_state (
+            id          INT PRIMARY KEY,
+            pos_x       FLOAT,
+            pos_y       FLOAT,
+            pos_z       FLOAT,
+            last_update TIMESTAMPTZ
+        )
     """)
+
+    async with httpx.AsyncClient() as client:
+        # ── Fetch inicial antes de empezar a emitir ──────────────────────────
+        try:
+            now = datetime.now(timezone.utc)
+            sv, mv = await asyncio.gather(
+                fetch_vectors(client, "-1024", now),
+                fetch_vectors(client, "301",   now),
+            )
+            jd = to_jd(now)
+            s, m = interp_state(sv, jd), interp_state(mv, jd)
+            if s:
+                _cache["ship"].update(s)
+                _cache["ship"]["t"] = now
+            if m:
+                _cache["moon"].update({k: m[k] for k in ("x", "y", "z")})
+                _cache["moon"]["t"] = now
+            _cache["source"] = "JPL HORIZONS"
+            dist = math.sqrt(s["x"]**2 + s["y"]**2 + s["z"]**2)
+            print(f"✅  Fetch inicial OK — Orion a {dist:,.0f} km de la Tierra")
+        except Exception as exc:
+            print(f"⚠️   Fetch inicial fallido: {exc} — emitiendo con cache vacío")
+
+        # ── Lanzar loops en paralelo ─────────────────────────────────────────
+        try:
+            await asyncio.gather(
+                refresh_loop(client),
+                telemetry_loop(conn),
+            )
+        finally:
+            await conn.close()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
