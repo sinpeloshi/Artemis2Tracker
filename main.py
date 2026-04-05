@@ -210,14 +210,16 @@ HTML = """<!DOCTYPE html>
 ───────────────────────────────────────────────────────────────────── */
 const SCALE       = 800;   // km → unidades Three.js  (400 000 km → 500 u)
 const TRAIL_MAX   = 1000;  // puntos en la estela de la nave
-const EARTH_R_KM  = 6371;
-const MOON_R_KM   = 1737;
+// Radios VISUALES (exagerados para visibilidad — posiciones siguen siendo reales)
+const EARTH_R_VIS = 38;    // ~5× respecto a escala real
+const MOON_R_VIS  = 18;    // ~7× respecto a escala real
+const ORION_SCALE = 5.5;   // factor de escala de la cápsula
 
 /* ─────────────────────────────────────────────────────────────────────
    Three.js — escena
 ───────────────────────────────────────────────────────────────────── */
 let scene, camera, renderer, controls;
-let meshEarth, meshMoon, meshOrion;
+let meshEarth, meshMoon, meshOrion, meshClouds;
 let trailLine = null;
 const trailPositions = [];
 
@@ -233,7 +235,7 @@ function initScene() {
 
   scene    = new THREE.Scene();
   camera   = new THREE.PerspectiveCamera(50, w / h, 0.1, 2000000);
-  camera.position.set(0, 300, 700);
+  camera.position.set(0, 120, 280);
 
   renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
   renderer.setSize(w, h);
@@ -252,12 +254,12 @@ function initScene() {
 
   // Tierra
   const texLoader = new THREE.TextureLoader();
-  const earthGeo  = new THREE.SphereGeometry(EARTH_R_KM / SCALE, 48, 48);
+  const earthGeo  = new THREE.SphereGeometry(EARTH_R_VIS, 64, 64);
   const earthMat  = new THREE.MeshPhongMaterial({
     map:      texLoader.load('https://unpkg.com/three-globe/example/img/earth-blue-marble.jpg',
                              undefined,
                              undefined,
-                             () => earthMat.color.set(0x1a5090)),  // fallback color
+                             () => earthMat.color.set(0x1a5090)),
     specularMap: texLoader.load('https://unpkg.com/three-globe/example/img/earth-water.png'),
     specular: new THREE.Color(0x333333),
     shininess: 15,
@@ -265,41 +267,55 @@ function initScene() {
   meshEarth = new THREE.Mesh(earthGeo, earthMat);
   scene.add(meshEarth);
 
+  // Nubes sobre la Tierra
+  const cloudGeo = new THREE.SphereGeometry(EARTH_R_VIS * 1.012, 64, 64);
+  const cloudMat = new THREE.MeshPhongMaterial({
+    map: texLoader.load('https://unpkg.com/three-globe/example/img/earth-clouds.png'),
+    transparent: true, opacity: 0.35, depthWrite: false,
+  });
+  meshClouds = new THREE.Mesh(cloudGeo, cloudMat);
+  scene.add(meshClouds);
+
+  // Atmósfera (glow)
+  const glowGeo = new THREE.SphereGeometry(EARTH_R_VIS * 1.08, 64, 64);
+  const glowMat = new THREE.MeshBasicMaterial({
+    color: 0x0044ff, transparent: true, opacity: 0.07, side: THREE.BackSide
+  });
+  scene.add(new THREE.Mesh(glowGeo, glowMat));
+
   // Luna
-  const moonGeo = new THREE.SphereGeometry(MOON_R_KM / SCALE, 32, 32);
-  const moonMat = new THREE.MeshStandardMaterial({ color: 0x999999, roughness: 0.9 });
+  const moonGeo = new THREE.SphereGeometry(MOON_R_VIS, 48, 48);
+  const moonMat = new THREE.MeshStandardMaterial({
+    map: texLoader.load('https://unpkg.com/three-globe/example/img/moon_1k.jpg',
+                        undefined, undefined,
+                        () => moonMat.color.set(0x888888)),
+    roughness: 0.95, metalness: 0.0,
+  });
   meshMoon = new THREE.Mesh(moonGeo, moonMat);
   scene.add(meshMoon);
 
-  // Orion (cápsula estilizada: cono + cilindro)
+  // Orion — misma geometría pero escalada con ORION_SCALE
   const orionGroup = new THREE.Group();
-  const capsulaGeo = new THREE.ConeGeometry(1.8, 4, 8);
-  const capsMat    = new THREE.MeshStandardMaterial({ color: 0xddddcc, metalness: 0.5 });
-  const modServGeo = new THREE.CylinderGeometry(1.8, 1.8, 3.5, 8);
-  const modMat     = new THREE.MeshStandardMaterial({ color: 0x888880, metalness: 0.6 });
+  const capsulaGeo = new THREE.ConeGeometry(1.8 * ORION_SCALE, 4 * ORION_SCALE, 8);
+  const capsMat    = new THREE.MeshStandardMaterial({ color: 0xddddcc, metalness: 0.5, roughness: 0.4 });
+  const modServGeo = new THREE.CylinderGeometry(1.8 * ORION_SCALE, 1.8 * ORION_SCALE, 3.5 * ORION_SCALE, 8);
+  const modMat     = new THREE.MeshStandardMaterial({ color: 0x888880, metalness: 0.6, roughness: 0.5 });
   const capsula    = new THREE.Mesh(capsulaGeo, capsMat);
   const modServ    = new THREE.Mesh(modServGeo, modMat);
-  capsula.position.y =  3.75;
-  modServ.position.y = -1.75;
+  capsula.position.y =  3.75 * ORION_SCALE;
+  modServ.position.y = -1.75 * ORION_SCALE;
   orionGroup.add(capsula, modServ);
 
-  // Paneles solares
-  const panelGeo = new THREE.BoxGeometry(12, 0.2, 2.5);
-  const panelMat = new THREE.MeshStandardMaterial({ color: 0x2266aa, metalness: 0.3 });
-  [-7, 7].forEach(px => {
+  // Paneles solares escalados
+  const panelGeo = new THREE.BoxGeometry(12 * ORION_SCALE, 0.2 * ORION_SCALE, 2.5 * ORION_SCALE);
+  const panelMat = new THREE.MeshStandardMaterial({ color: 0x2266aa, metalness: 0.3, roughness: 0.6 });
+  [-7 * ORION_SCALE, 7 * ORION_SCALE].forEach(px => {
     const p = new THREE.Mesh(panelGeo, panelMat);
     p.position.set(px, 0, 0);
     orionGroup.add(p);
   });
   meshOrion = orionGroup;
   scene.add(meshOrion);
-
-  // Glow de la Tierra
-  const glowGeo = new THREE.SphereGeometry(EARTH_R_KM / SCALE * 1.08, 48, 48);
-  const glowMat = new THREE.MeshBasicMaterial({
-    color: 0x0033ff, transparent: true, opacity: 0.08, side: THREE.BackSide
-  });
-  scene.add(new THREE.Mesh(glowGeo, glowMat));
 
   // Grid de fondo
   const grid = new THREE.GridHelper(3000, 30, 0x001a22, 0x000d11);
@@ -349,6 +365,7 @@ function updateTrail(pos3) {
 function animate() {
   requestAnimationFrame(animate);
   meshEarth.rotation.y += 0.0003;
+  if (meshClouds) meshClouds.rotation.y += 0.00035;
   controls.update();
   renderer.render(scene, camera);
 }
