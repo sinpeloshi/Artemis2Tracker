@@ -1,125 +1,71 @@
-import os
 import asyncio
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+import json
+import math
+import os
+import httpx
+from datetime import datetime, timedelta
+from skyfield.api import load
 import asyncpg
 
-app = FastAPI()
+# Configuración de Misión Real
+LAUNCH_DATE = datetime(2026, 4, 1, 12, 30, 0) # Fecha/Hora Real Despegue
+AVG_SPEED = 1.105 # km/s promedio tránsito lunar
+
 DATABASE_URL = os.getenv("DATABASE_ARTEMIS")
-active_connections = set()
+eph = load('de421.bsp')
+earth_eph, moon_eph = eph['earth'], eph['moon']
+ts = load.timescale()
 
-async def broadcast_telemetry(conn, pid, channel, payload):
-    for ws in list(active_connections):
-        try: await ws.send_text(payload)
-        except: active_connections.discard(ws)
+async def physics_loop():
+    if not DATABASE_URL: return
+    conn = await asyncpg.connect(DATABASE_URL)
+    
+    while True:
+        t = ts.now()
+        now = datetime.utcnow()
+        
+        # Posición de la Luna real
+        ast_moon = earth_eph.at(t).observe(moon_eph).position.km
+        mx, my, mz = [float(c) for c in ast_moon]
+        dist_luna_total = math.sqrt(mx**2 + my**2 + mz**2)
+        
+        # Sincronización Temporal
+        seconds_since_launch = (now - LAUNCH_DATE).total_seconds()
+        distance_traveled = seconds_since_launch * AVG_SPEED
+        progress_ratio = min(max(distance_traveled / dist_luna_total, 0.05), 0.98)
 
-@app.on_event("startup")
-async def startup():
-    app.state.db_conn = await asyncpg.connect(DATABASE_URL)
-    await app.state.db_conn.add_listener('telemetry_stream', broadcast_telemetry)
+        # Vector hacia la Luna
+        dir_x, dir_y, dir_z = mx / dist_luna_total, my / dist_luna_total, mz / dist_luna_total
+        
+        ox, oy, oz = mx * progress_ratio, my * progress_ratio, mz * progress_ratio
+        vx, vy, vz = dir_x * AVG_SPEED, dir_y * AVG_SPEED, dir_z * AVG_SPEED
 
-@app.websocket("/ws/telemetry")
-async def websocket_endpoint(websocket: WebSocket):
-    await websocket.accept()
-    active_connections.add(websocket)
-    try:
-        while True: await websocket.receive_text()
-    except WebSocketDisconnect: active_connections.discard(websocket)
+        # Métricas
+        dist_e = math.sqrt(ox**2 + oy**2 + oz**2)
+        dist_m = math.sqrt((mx-ox)**2 + (my-oy)**2 + (mz-oz)**2)
+        
+        lx, ly, lz = ox - mx, oy - my, oz - mz
+        v_moon = earth_eph.at(t).observe(moon_eph).velocity.km_per_s
+        vmx, vmy, vmz = [float(c) for c in v_moon]
+        v_rel_m = math.sqrt((vx-vmx)**2 + (vy-vmy)**2 + (vz-vmz)**2)
 
-@app.get("/")
-async def get():
-    return HTMLResponse(content="""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-        <title>NASA FIDO | Artemis II Master Console</title>
-        <style>
-            @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap');
-            body { margin:0; background:#000; color:#fff; font-family:'Share Tech Mono',monospace; overflow:hidden; font-size:12px; }
-            #viewport { height:40%; position:relative; border-bottom:1px solid #00f2ff; }
-            #hud { height:60%; padding:10px; display:grid; grid-template-columns: 1fr 1fr; gap:5px; background:#010a0c; overflow-y:auto; }
-            .card { border:1px solid rgba(0,242,255,0.3); padding:8px; background:rgba(0,242,255,0.02); }
-            .val { font-weight:bold; color:#00f2ff; float:right; }
-            .orange { color:#ff4800; }
-            .header { font-size:1.4rem; color:#00f2ff; margin-bottom:5px; }
-            #three-canvas { width:100%; height:100%; }
-        </style>
-        <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-        <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
-    </head>
-    <body>
-        <div id="viewport">
-            <div style="position:absolute; top:10px; left:10px; z-index:10">
-                <div id="met" style="font-size:1.2rem; color:#ffcc00">T+ 00:00:00:00</div>
-                <div id="clock">00:00:00 UTC</div>
-            </div>
-            <div id="three-canvas"></div>
-        </div>
-        <div id="hud">
-            <div class="card" style="grid-column: 1/3; border-color:#ff4800">
-                <div class="header orange">ARTEMIS II | TELEMETRÍA DE TRÁNSITO</div>
-                <div>DISTANCIA TIERRA <span class="val" id="d-earth">0 km</span></div>
-                <div>DISTANCIA LUNA <span class="val" id="d-moon">0 km</span></div>
-                <div>VELOCIDAD INERCIAL <span class="val orange" id="v-inertial">0 km/s</span></div>
-            </div>
-            <div class="card">
-                <div style="color:#888">VECTORES J2000</div>
-                <div>X <span class="val" id="v-x">0</span></div>
-                <div>Y <span class="val" id="v-y">0</span></div>
-                <div>Z <span class="val" id="v-z">0</span></div>
-            </div>
-            <div class="card">
-                <div style="color:#888">SISTEMA</div>
-                <div>LATENCIA LUZ <span class="val" id="v-light">0s</span></div>
-                <div>STATUS <span class="val" style="color:#0f0" id="v-src">SINCRO</span></div>
-            </div>
-        </div>
-        <script>
-            const SCALE = 1000;
-            let scene, camera, renderer, controls, earth, moon, orion;
-            function init3D() {
-                scene = new THREE.Scene();
-                camera = new THREE.PerspectiveCamera(50, window.innerWidth/(window.innerHeight*0.4), 1, 1000000);
-                camera.position.set(0, 400, 600);
-                renderer = new THREE.WebGLRenderer({antialias:true});
-                renderer.setSize(window.innerWidth, window.innerHeight*0.4);
-                document.getElementById('three-canvas').appendChild(renderer.domElement);
-                controls = new THREE.OrbitControls(camera, renderer.domElement);
-                scene.add(new THREE.AmbientLight(0x444444));
-                const sun = new THREE.DirectionalLight(0xffffff, 1); sun.position.set(5,3,5); scene.add(sun);
-                earth = new THREE.Mesh(new THREE.SphereGeometry(35,32,32), new THREE.MeshPhongMaterial({map: new THREE.TextureLoader().load('https://unpkg.com/three-globe/example/img/earth-blue-marble.jpg')}));
-                scene.add(earth);
-                moon = new THREE.Mesh(new THREE.SphereGeometry(15,32,32), new THREE.MeshStandardMaterial({color:0x888888}));
-                scene.add(moon);
-                orion = new THREE.Mesh(new THREE.CylinderGeometry(2,2,5,8), new THREE.MeshStandardMaterial({color:0xff4800}));
-                scene.add(orion);
-                scene.add(new THREE.GridHelper(2000, 20, 0x002222, 0x001111));
+        packet = {
+            "time": t.utc_strftime('%H:%M:%S.%f')[:-3] + " UTC",
+            "source": "NASA SINCRO REAL",
+            "met": f"T+ {int(seconds_since_launch//86400):02d}:{int((seconds_since_launch%86400)//3600):02d}:{int((seconds_since_launch%3600)//60):02d}:{int(seconds_since_launch%60):02d}",
+            "moon": {"x": mx, "y": my, "z": mz},
+            "ship": {
+                "x": ox, "y": oy, "z": oz, "v": AVG_SPEED,
+                "vx": vx, "vy": vy, "vz": vz,
+                "dist_e": dist_e, "dist_m": dist_m, "v_rel_m": v_rel_m,
+                "lat_m": math.degrees(math.asin(lz/dist_m)) if dist_m > 0 else 0,
+                "lon_m": math.degrees(math.atan2(ly, lx)) % 360,
+                "light_e": dist_e / 299792.458
             }
-            function connect() {
-                const ws = new WebSocket((location.protocol==='https:'?'wss:':'ws:') + '//' + location.host + '/ws/telemetry');
-                ws.onmessage = (e) => {
-                    const d = JSON.parse(e.data);
-                    document.getElementById('met').innerText = d.met;
-                    document.getElementById('clock').innerText = d.time;
-                    document.getElementById('d-earth').innerText = Math.round(d.ship.dist_e).toLocaleString() + " km";
-                    document.getElementById('d-moon').innerText = Math.round(d.ship.dist_m).toLocaleString() + " km";
-                    document.getElementById('v-inertial').innerText = d.ship.v.toFixed(3) + " km/s";
-                    document.getElementById('v-x').innerText = Math.round(d.ship.x);
-                    document.getElementById('v-y').innerText = Math.round(d.ship.y);
-                    document.getElementById('v-z').innerText = Math.round(d.ship.z);
-                    document.getElementById('v-light').innerText = d.ship.light_e.toFixed(4) + " s";
-                    orion.position.set(d.ship.x/SCALE, d.ship.z/SCALE, -d.ship.y/SCALE);
-                    moon.position.set(d.moon.x/SCALE, d.moon.z/SCALE, -d.moon.y/SCALE);
-                    controls.target.lerp(orion.position, 0.1);
-                };
-                ws.onclose = () => setTimeout(connect, 2000);
-            }
-            init3D(); connect();
-            function animate() { requestAnimationFrame(animate); earth.rotation.y+=0.001; controls.update(); renderer.render(scene, camera); }
-            animate();
-        </script>
-    </body>
-    </html>
-    """)
+        }
+        
+        await conn.execute("SELECT pg_notify('telemetry_stream', $1)", json.dumps(packet))
+        await asyncio.sleep(0.5)
+
+if __name__ == "__main__":
+    asyncio.run(physics_loop())
