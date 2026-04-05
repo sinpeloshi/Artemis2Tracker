@@ -5,7 +5,9 @@ from fastapi.responses import HTMLResponse
 import asyncpg
 
 app = FastAPI(title="NASA FIDO | Artemis Master Control")
-DATABASE_URL = os.getenv("DATABASE_URL")
+
+# CAMBIO APLICADO: Ahora busca la variable DATABASE_ARTEMIS
+DATABASE_URL = os.getenv("DATABASE_ARTEMIS")
 active_connections = set()
 
 async def broadcast_telemetry(conn, pid, channel, payload):
@@ -48,11 +50,7 @@ async def get_frontend():
             body, html { margin:0; padding:0; height:100dvh; background:var(--bg); color:#fff; font-family:'Share Tech Mono',monospace; overflow:hidden; touch-action: none; font-size: 14px;}
             
             #layout { display:flex; flex-direction:column; height:100%; width: 100%;}
-            
-            /* Viewport 3D Reducido (45%) */
             #viewport { height:45%; position:relative; border-bottom:1px solid rgba(0,242,255,0.5); background:#000; }
-            
-            /* HUD Táctico Masivo (55%) */
             #hud { height:55%; padding:10px; background:rgba(0,10,15,1); display:grid; grid-template-columns: 1fr 1fr; grid-template-rows: auto auto auto; gap:8px; overflow-y: auto;}
             
             .header-info { position:absolute; top:8px; left:8px; z-index:10; pointer-events:none; }
@@ -72,7 +70,6 @@ async def get_frontend():
             .val.small { font-size: 0.8rem; }
             .val.red { color:var(--red); font-weight: bold;}
 
-            /* Estilos de panel específicos */
             .p-estado { grid-column: 1 / 3; border-color: var(--orange); background:rgba(255,72,0,0.03); }
             .p-env { grid-column: 1 / 3; border-color: var(--green); }
 
@@ -137,7 +134,7 @@ async def get_frontend():
             // Variables para la Estela de Trayectoria
             let trailGeometry, trailLine;
             const trailPoints = [];
-            const MAX_TRAIL_LENGTH = 1000; // Recuerda los últimos 1000 puntos en el espacio
+            const MAX_TRAIL_LENGTH = 1000;
 
             function createLabel(text, color) {
                 const canvas = document.createElement('canvas');
@@ -204,7 +201,7 @@ async def get_frontend():
                 // Configuración de la Estela Roja (Trayectoria)
                 trailGeometry = new THREE.BufferGeometry();
                 const trailMaterial = new THREE.LineBasicMaterial({ 
-                    color: 0xff0000, // Rojo intenso
+                    color: 0xff0000,
                     linewidth: 2, 
                     transparent: true, 
                     opacity: 0.6 
@@ -268,9 +265,9 @@ async def get_frontend():
                     // --- ACTUALIZAR LA ESTELA ---
                     trailPoints.push(new THREE.Vector3(ox, oz, oy));
                     if (trailPoints.length > MAX_TRAIL_LENGTH) {
-                        trailPoints.shift(); // Borra el punto más viejo para no saturar la memoria
+                        trailPoints.shift();
                     }
-                    trailGeometry.setFromPoints(trailPoints); // Dibuja la línea nueva
+                    trailGeometry.setFromPoints(trailPoints);
 
                     controls.target.set(ox/2, oz/2, oy/2);
                 };
