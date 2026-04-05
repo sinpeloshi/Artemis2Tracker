@@ -193,7 +193,7 @@ async def get_frontend():
                 const p1 = new THREE.Mesh(new THREE.PlaneGeometry(22, 3), pMat); p1.rotation.x = Math.PI/2;
                 const p2 = new THREE.Mesh(new THREE.PlaneGeometry(3, 22), pMat); p2.rotation.x = Math.PI/2;
                 orion.add(sm, cm, p1, p2);
-                const oLbl = createLabel("ORION", "#ff4800"); oLbl.position.y = 15; orion.add(oTag);
+                const oLbl = createLabel("ORION", "#ff4800"); oLbl.position.y = 15; orion.add(oLbl);
                 scene.add(orion);
 
                 const starsGeo = new THREE.BufferGeometry();
@@ -206,4 +206,67 @@ async def get_frontend():
 
             function animate() {
                 requestAnimationFrame(animate);
-                earth.children
+                earth.children[0].rotation.y += 0.001;
+                orion.rotation.z += 0.01;
+                controls.update();
+                renderer.render(scene, camera);
+            }
+
+            function connect() {
+                const ws = new WebSocket((window.location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + window.location.host + '/ws/telemetry');
+                ws.onmessage = (e) => {
+                    const d = JSON.parse(e.data);
+                    // Actualización de Tiempos y Estado
+                    document.getElementById('clock').innerText = d.time;
+                    document.getElementById('met-clock').innerText = "MET " + d.met;
+                    document.getElementById('v-phase').innerText = d.phase;
+                    
+                    // Actualización de Enlace
+                    document.getElementById('v-source').innerText = d.source;
+                    document.getElementById('v-source').style.color = d.source.includes("LIVE") ? "#0f0" : "#ffaa00";
+                    
+                    // PANEL 1: Estado General
+                    document.getElementById('v-vel').innerText = d.ship.v.toFixed(5) + " km/s";
+                    document.getElementById('v-dist-e').innerText = Math.round(d.ship.dist_e).toLocaleString() + " km";
+                    document.getElementById('v-dist-m').innerText = Math.round(d.ship.dist_m).toLocaleString() + " km";
+                    
+                    // PANEL 2: Vectores J2000
+                    document.getElementById('v-x').innerText = d.ship.x.toFixed(2);
+                    document.getElementById('v-y').innerText = d.ship.y.toFixed(2);
+                    document.getElementById('v-z').innerText = d.ship.z.toFixed(2);
+                    document.getElementById('v-vx').innerText = d.ship.vx.toFixed(5);
+                    document.getElementById('v-vy').innerText = d.ship.vy.toFixed(5);
+                    document.getElementById('v-vz').innerText = d.ship.vz.toFixed(5);
+
+                    // PANEL 3: Estado Lunar
+                    document.getElementById('v-vrel-m').innerText = d.ship.v_rel_m.toFixed(5) + " km/s";
+                    document.getElementById('v-lat-m').innerText = d.ship.lat_m.toFixed(2) + "°";
+                    document.getElementById('v-lon-m').innerText = d.ship.lon_m.toFixed(2) + "°";
+                    document.getElementById('v-phase-angle').innerText = d.ship.phase_angle.toFixed(2) + "°";
+
+                    // PANEL 4: Ambiental
+                    document.getElementById('v-mach').innerText = d.ship.mach.toLocaleString(undefined,{maximumFractionDigits:2}) + " M";
+                    document.getElementById('v-light').innerText = d.ship.light_e.toFixed(4) + " s";
+                    document.getElementById('v-coords').innerText = d.ship.ra.toFixed(2) + "° RA / " + d.ship.dec.toFixed(2) + "° DEC";
+
+                    const ox = d.ship.x/SCALE, oz = d.ship.z/SCALE, oy = -d.ship.y/SCALE;
+                    const mx = d.moon.x/SCALE, mz = d.moon.z/SCALE, my = -d.moon.y/SCALE;
+                    
+                    orion.position.set(ox, oz, oy); 
+                    moon.position.set(mx, mz, my);
+                    controls.target.set(ox/2, oz/2, oy/2);
+                };
+                ws.onclose = () => setTimeout(connect, 1000);
+            }
+
+            init3D(); animate(); connect();
+            window.addEventListener('resize', () => {
+                const c = document.getElementById('three-canvas');
+                camera.aspect = c.clientWidth/c.clientHeight; camera.updateProjectionMatrix();
+                renderer.setSize(c.clientWidth, c.clientHeight);
+            });
+        </script>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html_content)
