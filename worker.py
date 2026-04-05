@@ -8,6 +8,7 @@ Estrategia:
   - refresh_loop()  : cada 60 s consulta Horizons → guarda state vectors reales
   - telemetry_loop(): cada 0.5 s extrapola posición con velocidad actual → pg_notify
 """
+from __future__ import annotations   # ← lazy annotations: compatible Python 3.7+
 
 import asyncio
 import json
