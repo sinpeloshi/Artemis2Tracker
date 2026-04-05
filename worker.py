@@ -7,18 +7,20 @@ from datetime import datetime, timedelta
 from skyfield.api import load
 import asyncpg
 
-print("--- [SISTEMA CRÍTICO] INICIANDO CAZADOR DE TELEMETRÍA ARTEMIS II ---")
+print("--- [SISTEMA CRÍTICO] INICIANDO MASTER PHYSICS ENGINE (V4) ---")
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 eph = load('de421.bsp')
 earth_eph, moon_eph, sun_eph = eph['earth'], eph['moon'], eph['sun']
 ts = load.timescale()
 
-# Estado global del vector de la nave
+# Fecha de despegue de Artemis II (Real: 1 de Abril 2026, 00:00 UTC)
+LAUNCH_DATE = datetime(2026, 4, 1, 0, 0, 0)
+
 state_vector = {"pos": None, "vel": None, "timestamp": datetime.utcnow(), "source": "INIT"}
 
 async def fetch_nasa_jpl():
-    """Intenta perforar el acceso a JPL Horizons usando headers de alta fidelidad"""
+    """Perforadora de Firewall de JPL con disfraz de alta fidelidad"""
     now = datetime.utcnow()
     t_start = now.strftime('%Y-%m-%d %H:%M')
     t_stop = (now + timedelta(minutes=1)).strftime('%Y-%m-%d %H:%M')
@@ -32,11 +34,8 @@ async def fetch_nasa_jpl():
     }
 
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-        "Accept": "text/plain,*/*",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Origin": "https://ssd.jpl.nasa.gov",
-        "Referer": "https://ssd.jpl.nasa.gov/horizons/app.html"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/123.0.0.0 Safari/537.36",
+        "Accept": "*/*", "Connection": "keep-alive"
     }
 
     async with httpx.AsyncClient(follow_redirects=True, timeout=20.0) as client:
@@ -47,26 +46,19 @@ async def fetch_nasa_jpl():
                 x, y, z, vx, vy, vz = 0, 0, 0, 0, 0, 0
                 for line in data:
                     if "X =" in line:
-                        p = line.split()
-                        x, y, z = float(p[2]), float(p[5]), float(p[8])
+                        p = line.split(); x, y, z = float(p[2]), float(p[5]), float(p[8])
                     if "VX=" in line:
-                        p = line.split()
-                        vx, vy, vz = float(p[1]), float(p[3]), float(p[5])
+                        p = line.split(); vx, vy, vz = float(p[1]), float(p[3]), float(p[5])
                 
                 state_vector.update({
                     "pos": [x, y, z], "vel": [vx, vy, vz], 
-                    "timestamp": now, "source": "NASA DSN LIVE (ARTEMIS II)"
+                    "timestamp": now, "source": "NASA JPL LIVE"
                 })
-                print(">>> ENLACE DSN ESTABLECIDO: Recibiendo datos reales.")
                 return True
-            else:
-                print(f">>> NASA LINK: Sin datos (Status {r.status_code}). Usando paracaídas inercial.")
-        except Exception as e:
-            print(f">>> ERROR DE RED: {e}")
+        except: pass
     return False
 
 async def nasa_update_loop():
-    """Bucle de fondo que intenta reconectar a la NASA cada 45 segundos"""
     while True:
         await fetch_nasa_jpl()
         await asyncio.sleep(45)
@@ -77,68 +69,103 @@ async def physics_loop():
         return
 
     conn = await asyncpg.connect(DATABASE_URL)
-    print("CONECTADO AL NÚCLEO POSTGRES")
-
-    # Arrancamos el cazador en segundo plano
     asyncio.create_task(nasa_update_loop())
 
     while True:
         t = ts.now()
         now = datetime.utcnow()
         
-        # Posición de la Luna real (calculada localmente)
+        # Posiciones astronómicas reales
         ast_moon = earth_eph.at(t).observe(moon_eph).position.km
         mx, my, mz = [float(c) for c in ast_moon]
-        
-        # Si no tenemos datos de la NASA aún, activamos el simulador inercial corregido
-        if state_vector["pos"] is None:
-            # 1. Calculamos la distancia total a la Luna
-            dist_luna_total = math.sqrt(mx**2 + my**2 + mz**2)
-            
-            # 2. Calculamos el VECTOR UNITARIO (la flecha matemática que apunta exactamente a la Luna)
-            dir_x = mx / dist_luna_total
-            dir_y = my / dist_luna_total
-            dir_z = mz / dist_luna_total
-            
-            # 3. Le aplicamos la velocidad de 1.105 km/s en esa dirección exacta
-            velocidad_simulada = 1.105
-            vel_x = dir_x * velocidad_simulada
-            vel_y = dir_y * velocidad_simulada
-            vel_z = dir_z * velocidad_simulada
+        ast_sun = earth_eph.at(t).observe(sun_eph).position.km
+        sx, sy, sz = [float(c) for c in ast_sun]
 
-            # Ubicamos la nave al 72% del camino con la velocidad correcta apuntando a la Luna
+        if state_vector["pos"] is None:
+            # Fallback cinemático (Día 4-5 de misión)
+            dist_luna_total = math.sqrt(mx**2 + my**2 + mz**2)
+            dir_x, dir_y, dir_z = mx / dist_luna_total, my / dist_luna_total, mz / dist_luna_total
             state_vector.update({
                 "pos": [mx * 0.72, my * 0.72, mz * 0.72], 
-                "vel": [vel_x, vel_y, vel_z], 
-                "source": "BUSCANDO SEÑAL DSN (SIM)", 
-                "timestamp": now
+                "vel": [dir_x * 1.105, dir_y * 1.105, dir_z * 1.105], 
+                "source": "SIMULACIÓN INERCIAL", "timestamp": now
             })
 
-        # Extrapolación de movimiento (Dead Reckoning)
         dt = (now - state_vector["timestamp"]).total_seconds()
+        
+        # Dead Reckoning inercial
         ox = state_vector["pos"][0] + (state_vector["vel"][0] * dt)
         oy = state_vector["pos"][1] + (state_vector["vel"][1] * dt)
         oz = state_vector["pos"][2] + (state_vector["vel"][2] * dt)
+        ovx, ovy, ovz = state_vector["vel"][0], state_vector["vel"][1], state_vector["vel"][2]
         
-        v_mag = math.sqrt(sum(v**2 for v in state_vector["vel"]))
+        # Métrica Geocéntrica Básica
         dist_e = math.sqrt(ox**2 + oy**2 + oz**2)
         dist_m = math.sqrt((mx-ox)**2 + (my-oy)**2 + (mz-oz)**2)
+        v_mag = math.sqrt(ovx**2 + ovy**2 + ovz**2)
         
+        # --- NUEVA MATEMÁTICA SELENOCÉNTRICA (Luna) ---
+        # 1. Vector Posición Relativo a la Luna (L-J2000)
+        lx, ly, lz = ox - mx, oy - my, oz - mz
+        
+        # 2. Vector Velocidad Relativo a la Luna
+        # Necesitamos la velocidad de la Luna (vM) para calcular vRel = vShip - vM.
+        # Skyfield lo da en AU/día, convertimos a km/s.
+        v_moon = earth_eph.at(t).observe(moon_eph).velocity.km_per_s
+        vmx, vmy, vmz = [float(c) for c in v_moon]
+        lvx, lvy, lvz = ovx - vmx, ovy - vmy, ovz - vmz
+        v_rel_luna = math.sqrt(lvx**2 + lvy**2 + lvz**2)
+
+        # 3. Coordenadas Selenográficas (Lat/Lon) - Aproximación J2000
+        lon_luna = math.degrees(math.atan2(ly, lx)) % 360
+        lat_luna = math.degrees(math.asin(lz / dist_m))
+
+        # --- FÍSICA AMBIENTAL AVANZADA ---
+        # 1. Ángulo de Fase Lunar (visto por la nave)
+        # Vector Sol-Luna y Vector Nave-Luna. Ángulo entre ellos.
+        smx, smy, smz = mx - sx, my - sy, mz - sz # Vector Sol->Luna
+        dist_sm = math.sqrt(smx**2 + smy**2 + smz**2)
+        v_sol_luna_u = [smx/dist_sm, smy/dist_sm, smz/dist_sm]
+        v_nave_luna_u = [lx/dist_m, ly/dist_m, lz/dist_m]
+        
+        # Producto punto para el ángulo
+        dot_phase = sum(s*n for s,n in zip(v_sol_luna_u, v_nave_luna_u))
+        phase_angle = math.degrees(math.acos(max(-1, min(1, dot_phase))))
+
+        # CÁLCULO MET
+        delta = now - LAUNCH_DATE
+        met_str = f"T+ {delta.days:02d}:{delta.seconds // 3600:02d}:{(delta.seconds // 60) % 60:02d}:{delta.seconds % 60:02d}"
+
+        # FASE DE VUELO LÓGICA
+        flight_phase = "OUTBOUND COAST"
+        if dist_e < 15000: flight_phase = "EARTH ORBIT"
+        elif dist_m < 80000: flight_phase = "LUNAR APPROACH"
+        elif dist_m < 3500: flight_phase = "PERILUNE INSERT."
+
         packet = {
             "time": t.utc_strftime('%H:%M:%S.%f')[:-3] + " UTC",
             "source": state_vector["source"],
+            "met": met_str,
+            "phase": flight_phase,
             "moon": {"x": mx, "y": my, "z": mz},
             "ship": {
-                "x": ox, "y": oy, "z": oz, "v": v_mag, "dist_e": dist_e, "dist_m": dist_m,
-                "light": dist_e / 299792.458, "mach": v_mag * 3600 / 1234.8,
+                # Datos Inerciales J2000
+                "x": ox, "y": oy, "z": oz, 
+                "vx": ovx, "vy": ovy, "vz": ovz, "v": v_mag,
+                # Datos Relativos a la Tierra
+                "dist_e": dist_e, "light_e": dist_e / 299792.458,
+                # Datos Relativos a la Luna (Selocéntricos)
+                "dist_m": dist_m, "v_rel_m": v_rel_luna,
+                "lat_m": lat_luna, "lon_m": lon_luna,
+                # Datos Ambientales
+                "phase_angle": phase_angle,
+                "mach": v_mag * 3600 / 1234.8,
                 "dec": math.degrees(math.asin(oz / dist_e)) if dist_e > 0 else 0,
                 "ra": math.degrees(math.atan2(oy, ox)) % 360
             }
         }
-        
-        # Inyectamos el paquete a la base de datos para que el main.py lo vea
         await conn.execute("SELECT pg_notify('telemetry_stream', $1)", json.dumps(packet))
-        await asyncio.sleep(0.05) # 20 FPS
+        await asyncio.sleep(0.05)
 
 if __name__ == "__main__":
     asyncio.run(physics_loop())
